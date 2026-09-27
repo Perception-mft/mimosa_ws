@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Mimosa pre-GTSAM IMU/LiDAR states with GPS ground truth."""
+"""Compare Mimosa pre-GTSAM IMU/LiDAR states with GPS and AWSIM ground truth."""
 
 from __future__ import annotations
 
@@ -17,10 +17,12 @@ import numpy as np
 EXPECTED_TYPE = "mimosa_msgs/msg/FactorGraphState"
 GPS_TYPE = "sensor_msgs/msg/NavSatFix"
 ODOMETRY_TYPE = "nav_msgs/msg/Odometry"
+POSE_STAMPED_TYPE = "geometry_msgs/msg/PoseStamped"
 DEFAULT_IMU_TOPIC = "/debug/imu/state"
 DEFAULT_LIDAR_TOPIC = "/debug/lidar/state"
 DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
+DEFAULT_AWSIM_TOPIC = "/control/state/pose"
 
 go = None
 pio = None
@@ -172,9 +174,9 @@ class CdrReader:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Read Mimosa pre-optimization IMU/LiDAR states, optimized odometry, and "
-            "NavSatFix GPS ground truth from a ROS 2 bag, then create an interactive "
-            "Plotly HTML report."
+            "Read Mimosa pre-optimization IMU/LiDAR states, optimized odometry, "
+            "NavSatFix GPS, and AWSIM ground truth from a ROS 2 bag, then create an "
+            "interactive Plotly HTML report."
         )
     )
     parser.add_argument("bag", type=Path, help="ROS 2 bag directory, .db3 file, or .mcap file")
@@ -188,6 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lidar-topic", default=DEFAULT_LIDAR_TOPIC)
     parser.add_argument("--gps-topic", default=DEFAULT_GPS_TOPIC)
     parser.add_argument("--odometry-topic", default=DEFAULT_ODOMETRY_TOPIC)
+    parser.add_argument("--awsim-topic", default=DEFAULT_AWSIM_TOPIC)
     parser.add_argument(
         "--max-time-difference",
         type=float,
@@ -287,6 +290,21 @@ def decode_odometry(payload: bytes, bag_timestamp_ns: int) -> DecodedPose:
     nanoseconds = reader.uint32()
     reader.string()  # header.frame_id
     reader.string()  # child_frame_id
+    position = np.asarray([reader.float64() for _ in range(3)])
+    quaternion = np.asarray([reader.float64() for _ in range(4)])
+    timestamp = (
+        bag_timestamp_ns * 1e-9
+        if seconds == 0 and nanoseconds == 0
+        else float(seconds) + float(nanoseconds) * 1e-9
+    )
+    return DecodedPose(timestamp, position, quaternion)
+
+
+def decode_pose_stamped(payload: bytes, bag_timestamp_ns: int) -> DecodedPose:
+    reader = CdrReader(payload)
+    seconds = reader.int32()
+    nanoseconds = reader.uint32()
+    reader.string()  # header.frame_id
     position = np.asarray([reader.float64() for _ in range(3)])
     quaternion = np.asarray([reader.float64() for _ in range(4)])
     timestamp = (
@@ -496,12 +514,14 @@ def read_bag(
     lidar_topic: str,
     gps_topic: str,
     odometry_topic: str,
-) -> Tuple[Dict[str, StateSeries], GpsSeries, PoseSeries]:
+    awsim_topic: str,
+) -> Tuple[Dict[str, StateSeries], GpsSeries, PoseSeries, PoseSeries]:
     decoders = {
         imu_topic: decode_state,
         lidar_topic: decode_state,
         gps_topic: decode_gps,
         odometry_topic: decode_odometry,
+        awsim_topic: decode_pose_stamped,
     }
     storage_id, storage_files = bag_storage_paths(bag_path)
     if storage_id == "sqlite3":
@@ -521,6 +541,7 @@ def read_bag(
         lidar_topic: EXPECTED_TYPE,
         gps_topic: GPS_TYPE,
         odometry_topic: ODOMETRY_TYPE,
+        awsim_topic: POSE_STAMPED_TYPE,
     }
     wrong_types = [
         f"{topic}: expected {expected_types[topic]}, found {discovered_types[topic]}"
@@ -538,6 +559,7 @@ def read_bag(
         states,
         records_to_gps_series(records[gps_topic]),
         records_to_pose_series(records[odometry_topic]),
+        records_to_pose_series(records[awsim_topic]),
     )
 
 
@@ -591,6 +613,38 @@ def transform_positions(
     return positions @ rotation.T + translation
 
 
+def quaternion_to_rotation_matrix(quaternion: Sequence[float]) -> np.ndarray:
+    x, y, z, w = quaternion
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm == 0.0:
+        raise ValueError("Cannot convert a zero-length quaternion")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ]
+    )
+
+
+def aligned_rpy_deg(quaternions: np.ndarray, frame_rotation: np.ndarray) -> np.ndarray:
+    """Express orientations in a frame reached by left-multiplying frame_rotation."""
+    rpy = []
+    for quaternion in quaternions:
+        matrix = frame_rotation @ quaternion_to_rotation_matrix(quaternion)
+        roll = math.atan2(matrix[2, 1], matrix[2, 2])
+        pitch = math.asin(float(np.clip(-matrix[2, 0], -1.0, 1.0)))
+        yaw = math.atan2(matrix[1, 0], matrix[0, 0])
+        rpy.append([roll, pitch, yaw])
+    return np.rad2deg(np.unwrap(np.asarray(rpy), axis=0))
+
+
+def zero_at_first_position(positions: np.ndarray) -> np.ndarray:
+    """Express a position series relative to its first sample."""
+    return positions - positions[0]
+
+
 def gps_component_figure(
     component: int,
     imu_time: np.ndarray,
@@ -601,12 +655,16 @@ def gps_component_figure(
     output_position: np.ndarray,
     gps_time: np.ndarray,
     gps_position: np.ndarray,
+    awsim_time: np.ndarray,
+    awsim_position: np.ndarray,
     imu_error_time: np.ndarray,
     imu_error: np.ndarray,
     lidar_error_time: np.ndarray,
     lidar_error: np.ndarray,
     output_error_time: np.ndarray,
     output_error: np.ndarray,
+    output_gt_error_time: np.ndarray,
+    output_gt_error: np.ndarray,
 ) -> go.Figure:
     axis = ("x", "y", "z")[component]
     figure = make_subplots(
@@ -615,10 +673,16 @@ def gps_component_figure(
         shared_xaxes=True,
         row_heights=[0.68, 0.32],
         vertical_spacing=0.1,
-        subplot_titles=(f"Position {axis}", f"Position {axis} error against GPS"),
+        subplot_titles=(f"Position {axis}", f"Position {axis} errors"),
     )
     figure.add_trace(
-        go.Scatter(x=imu_time, y=imu_position[:, component], name="IMU", mode="lines"),
+        go.Scatter(
+            x=imu_time,
+            y=imu_position[:, component],
+            name="IMU",
+            mode="lines",
+            visible="legendonly",
+        ),
         row=1,
         col=1,
     )
@@ -629,6 +693,7 @@ def gps_component_figure(
             name="LiDAR",
             mode="lines+markers",
             marker={"size": 4},
+            visible="legendonly",
         ),
         row=1,
         col=1,
@@ -637,9 +702,21 @@ def gps_component_figure(
         go.Scatter(
             x=gps_time,
             y=gps_position[:, component],
-            name="GPS ground truth",
+            name="GPS",
             mode="lines+markers",
             marker={"size": 5},
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=awsim_time,
+            y=awsim_position[:, component],
+            name="AWSIM ground truth",
+            mode="lines",
+            line={"width": 3, "dash": "dot"},
         ),
         row=1,
         col=1,
@@ -661,6 +738,7 @@ def gps_component_figure(
             y=imu_error[:, component],
             name="IMU - GPS",
             mode="lines",
+            visible="legendonly",
         ),
         row=2,
         col=1,
@@ -671,6 +749,7 @@ def gps_component_figure(
             y=lidar_error[:, component],
             name="LiDAR - GPS",
             mode="lines",
+            visible="legendonly",
         ),
         row=2,
         col=1,
@@ -679,18 +758,30 @@ def gps_component_figure(
         go.Scatter(
             x=output_error_time,
             y=output_error[:, component],
-            name="Mimosa output - GPS",
+            name="GPS - Mimosa output",
+            mode="lines",
+            line={"width": 3},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=output_gt_error_time,
+            y=output_gt_error[:, component],
+            name="AWSIM GT - Mimosa output",
             mode="lines",
             line={"width": 3},
         ),
         row=2,
         col=1,
     )
-    figure.update_yaxes(title_text=f"ENU {axis} [m]", row=1, col=1)
+    figure.update_yaxes(title_text=f"Relative {axis} [m]", row=1, col=1)
     figure.update_yaxes(title_text="Error [m]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
     figure.update_layout(
-        title=f"Position {axis}: IMU, LiDAR, and Mimosa output against GPS",
+        title=f"Position {axis}: Mimosa output and AWSIM ground truth",
         height=700,
         hovermode="x unified",
         template="plotly_white",
@@ -707,10 +798,14 @@ def orientation_component_figure(
     lidar_orientation: np.ndarray,
     output_time: np.ndarray,
     output_orientation: np.ndarray,
+    awsim_time: np.ndarray,
+    awsim_orientation: np.ndarray,
     lidar_error_time: np.ndarray,
     lidar_orientation_error: np.ndarray,
     output_error_time: np.ndarray,
     output_orientation_error: np.ndarray,
+    output_gt_error_time: np.ndarray,
+    output_gt_orientation_error: np.ndarray,
 ) -> go.Figure:
     angle = ("Roll", "Pitch", "Yaw")[component]
     figure = make_subplots(
@@ -719,7 +814,7 @@ def orientation_component_figure(
         shared_xaxes=True,
         row_heights=[0.68, 0.32],
         vertical_spacing=0.1,
-        subplot_titles=(angle, f"{angle} differences against IMU"),
+        subplot_titles=(angle, f"{angle} differences"),
     )
     figure.add_trace(
         go.Scatter(
@@ -727,6 +822,7 @@ def orientation_component_figure(
             y=imu_orientation[:, component],
             name="IMU",
             mode="lines",
+            visible="legendonly",
         ),
         row=1,
         col=1,
@@ -738,6 +834,7 @@ def orientation_component_figure(
             name="LiDAR",
             mode="lines+markers",
             marker={"size": 4},
+            visible="legendonly",
         ),
         row=1,
         col=1,
@@ -755,10 +852,22 @@ def orientation_component_figure(
     )
     figure.add_trace(
         go.Scatter(
+            x=awsim_time,
+            y=awsim_orientation[:, component],
+            name="AWSIM ground truth",
+            mode="lines",
+            line={"width": 3, "dash": "dot"},
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
             x=lidar_error_time,
             y=lidar_orientation_error[:, component],
             name="LiDAR - IMU",
             mode="lines",
+            visible="legendonly",
         ),
         row=2,
         col=1,
@@ -770,6 +879,18 @@ def orientation_component_figure(
             name="Mimosa output - IMU",
             mode="lines",
             line={"width": 3},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=output_gt_error_time,
+            y=output_gt_orientation_error[:, component],
+            name="AWSIM GT - Mimosa output",
+            mode="lines",
+            line={"width": 3},
         ),
         row=2,
         col=1,
@@ -778,7 +899,7 @@ def orientation_component_figure(
     figure.update_yaxes(title_text="Difference [deg]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
     figure.update_layout(
-        title=f"Orientation {angle.lower()}: IMU, LiDAR, and Mimosa output",
+        title=f"Orientation {angle.lower()}: Mimosa output and AWSIM ground truth",
         height=700,
         hovermode="x unified",
         template="plotly_white",
@@ -792,13 +913,15 @@ def gps_trajectory_figure(
     lidar_position: np.ndarray,
     output_position: np.ndarray,
     gps_position: np.ndarray,
+    awsim_position: np.ndarray,
 ) -> go.Figure:
     figure = go.Figure()
     for name, position in (
         ("IMU", imu_position),
         ("LiDAR", lidar_position),
         ("Mimosa output", output_position),
-        ("GPS ground truth", gps_position),
+        ("GPS", gps_position),
+        ("AWSIM ground truth", awsim_position),
     ):
         figure.add_trace(
             go.Scatter3d(
@@ -807,10 +930,16 @@ def gps_trajectory_figure(
                 z=position[:, 2],
                 name=name,
                 mode="lines",
+                visible=(
+                    True
+                    if name in ("Mimosa output", "AWSIM ground truth")
+                    else "legendonly"
+                ),
             )
         )
     figure.update_layout(
         title="Aligned 3D trajectories",
+        height=1000,
         template="plotly_white",
         scene={"xaxis_title": "East [m]", "yaxis_title": "North [m]", "zaxis_title": "Up [m]"},
     )
@@ -827,6 +956,7 @@ def summary_html(
     lidar: StateSeries,
     gps: GpsSeries,
     output: PoseSeries,
+    awsim: PoseSeries,
     matched_count: int,
     output_matched_count: int,
     position_delta: np.ndarray,
@@ -834,16 +964,33 @@ def summary_html(
     gps_alignment: str,
     imu_gps_error: np.ndarray,
     lidar_gps_error: np.ndarray,
-    output_gps_error: np.ndarray,
+    gps_output_error: np.ndarray,
+    output_gt_position_error: np.ndarray,
+    output_gt_orientation_error: np.ndarray,
 ) -> str:
     def metric(values: np.ndarray, operation, fallback: str = "n/a") -> str:
         return fallback if values.size == 0 else f"{operation(values):.6g}"
+
+    def component_metrics(
+        values: np.ndarray,
+        operation,
+        labels: Sequence[str],
+        unit: str,
+        fallback: str = "n/a",
+    ) -> str:
+        if values.size == 0:
+            return fallback
+        result = operation(values)
+        return ", ".join(
+            f"{label}={value:.6g} {unit}" for label, value in zip(labels, result)
+        )
 
     rows = [
         ("Bag", str(bag_path)),
         ("IMU samples", str(len(imu))),
         ("LiDAR samples", str(len(lidar))),
         ("Mimosa output samples", str(len(output))),
+        ("AWSIM ground truth samples", str(len(awsim))),
         ("Valid GPS samples", str(len(gps))),
         ("LiDAR/IMU matched samples", str(matched_count)),
         ("Mimosa output/IMU matched samples", str(output_matched_count)),
@@ -889,22 +1036,101 @@ def summary_html(
             "LiDAR maximum position error against GPS",
             metric(np.linalg.norm(lidar_gps_error, axis=1), np.max) + " m",
         ),
-        ("Mimosa output/GPS matched samples", str(len(output_gps_error))),
+        ("GPS/Mimosa output matched samples", str(len(gps_output_error))),
         (
             "Mimosa output position RMSE against GPS",
             metric(
-                np.linalg.norm(output_gps_error, axis=1),
+                np.linalg.norm(gps_output_error, axis=1),
                 lambda value: np.sqrt(np.mean(value**2)),
             )
             + " m",
         ),
         (
             "Mimosa output mean position error against GPS",
-            metric(np.linalg.norm(output_gps_error, axis=1), np.mean) + " m",
+            metric(np.linalg.norm(gps_output_error, axis=1), np.mean) + " m",
         ),
         (
             "Mimosa output maximum position error against GPS",
-            metric(np.linalg.norm(output_gps_error, axis=1), np.max) + " m",
+            metric(np.linalg.norm(gps_output_error, axis=1), np.max) + " m",
+        ),
+        ("Mimosa output/AWSIM GT matched samples", str(len(output_gt_position_error))),
+        (
+            "AWSIM GT - Mimosa mean position error",
+            component_metrics(
+                output_gt_position_error,
+                lambda value: np.mean(value, axis=0),
+                ("x", "y", "z"),
+                "m",
+            ),
+        ),
+        (
+            "AWSIM GT - Mimosa position RMSE by axis",
+            component_metrics(
+                output_gt_position_error,
+                lambda value: np.sqrt(np.mean(value**2, axis=0)),
+                ("x", "y", "z"),
+                "m",
+            ),
+        ),
+        (
+            "AWSIM GT - Mimosa maximum absolute position error",
+            component_metrics(
+                output_gt_position_error,
+                lambda value: np.max(np.abs(value), axis=0),
+                ("x", "y", "z"),
+                "m",
+            ),
+        ),
+        (
+            "Mimosa output position RMSE against AWSIM GT",
+            metric(
+                np.linalg.norm(output_gt_position_error, axis=1),
+                lambda value: np.sqrt(np.mean(value**2)),
+            )
+            + " m",
+        ),
+        (
+            "Mimosa output mean position error against AWSIM GT",
+            metric(np.linalg.norm(output_gt_position_error, axis=1), np.mean) + " m",
+        ),
+        (
+            "Mimosa output maximum position error against AWSIM GT",
+            metric(np.linalg.norm(output_gt_position_error, axis=1), np.max) + " m",
+        ),
+        (
+            "AWSIM GT - Mimosa mean orientation error",
+            component_metrics(
+                output_gt_orientation_error,
+                lambda value: np.mean(value, axis=0),
+                ("roll", "pitch", "yaw"),
+                "deg",
+            ),
+        ),
+        (
+            "AWSIM GT - Mimosa orientation RMSE by angle",
+            component_metrics(
+                output_gt_orientation_error,
+                lambda value: np.sqrt(np.mean(value**2, axis=0)),
+                ("roll", "pitch", "yaw"),
+                "deg",
+            ),
+        ),
+        (
+            "AWSIM GT - Mimosa maximum absolute orientation error",
+            component_metrics(
+                output_gt_orientation_error,
+                lambda value: np.max(np.abs(value), axis=0),
+                ("roll", "pitch", "yaw"),
+                "deg",
+            ),
+        ),
+        (
+            "Mimosa output mean absolute orientation error against AWSIM GT",
+            metric(np.abs(output_gt_orientation_error), np.mean) + " deg",
+        ),
+        (
+            "Mimosa output maximum absolute orientation error against AWSIM GT",
+            metric(np.abs(output_gt_orientation_error), np.max) + " deg",
         ),
     ]
     return "<table>" + "".join(
@@ -920,28 +1146,26 @@ def write_report(
     lidar: StateSeries,
     gps: GpsSeries,
     mimosa_output: PoseSeries,
+    awsim: PoseSeries,
     max_time_difference: float,
     gps_max_time_difference: float,
     gps_alignment: str,
     plotlyjs: str,
 ) -> None:
-    start_time = min(imu.time[0], lidar.time[0], gps.time[0], mimosa_output.time[0])
+    start_time = min(
+        imu.time[0], lidar.time[0], gps.time[0], mimosa_output.time[0], awsim.time[0]
+    )
     imu_time = imu.time - start_time
     lidar_time = lidar.time - start_time
     gps_time = gps.time - start_time
     output_time = mimosa_output.time - start_time
+    awsim_time = awsim.time - start_time
 
     lidar_matches, imu_matches = nearest_matches(imu.time, lidar.time, max_time_difference)
     matched_time = lidar.time[lidar_matches] - start_time
     position_delta = lidar.position[lidar_matches] - imu.position[imu_matches]
-    orientation_delta = wrapped_angle_difference_deg(
-        lidar.rpy_deg[lidar_matches], imu.rpy_deg[imu_matches]
-    )
     output_matches, imu_output_matches = nearest_matches(
         imu.time, mimosa_output.time, max_time_difference
-    )
-    output_orientation_error = wrapped_angle_difference_deg(
-        mimosa_output.rpy_deg[output_matches], imu.rpy_deg[imu_output_matches]
     )
     output_orientation_error_time = mimosa_output.time[output_matches] - start_time
 
@@ -958,6 +1182,34 @@ def write_report(
     output_position_aligned = transform_positions(
         mimosa_output.position, rotation, translation
     )
+    awsim_for_alignment, gps_for_awsim_alignment = nearest_matches(
+        gps.time, awsim.time, gps_max_time_difference
+    )
+    awsim_rotation, awsim_translation = estimate_position_alignment(
+        awsim.position[awsim_for_alignment],
+        gps.position_enu[gps_for_awsim_alignment],
+        gps_alignment,
+    )
+    awsim_position_aligned = transform_positions(
+        awsim.position, awsim_rotation, awsim_translation
+    )
+
+    imu_rpy_aligned = aligned_rpy_deg(imu.quaternion, rotation)
+    lidar_rpy_aligned = aligned_rpy_deg(lidar.quaternion, rotation)
+    output_rpy_aligned = aligned_rpy_deg(mimosa_output.quaternion, rotation)
+    awsim_rpy_aligned = aligned_rpy_deg(awsim.quaternion, awsim_rotation)
+    orientation_delta = wrapped_angle_difference_deg(
+        lidar_rpy_aligned[lidar_matches], imu_rpy_aligned[imu_matches]
+    )
+    output_orientation_error = wrapped_angle_difference_deg(
+        output_rpy_aligned[output_matches], imu_rpy_aligned[imu_output_matches]
+    )
+
+    imu_position_aligned = zero_at_first_position(imu_position_aligned)
+    lidar_position_aligned = zero_at_first_position(lidar_position_aligned)
+    output_position_aligned = zero_at_first_position(output_position_aligned)
+    gps_position = zero_at_first_position(gps.position_enu)
+    awsim_position_aligned = zero_at_first_position(awsim_position_aligned)
 
     imu_gps_matches, gps_imu_matches = nearest_matches(
         gps.time, imu.time, gps_max_time_difference
@@ -969,18 +1221,29 @@ def write_report(
         gps.time, mimosa_output.time, gps_max_time_difference
     )
     imu_gps_error = (
-        imu_position_aligned[imu_gps_matches] - gps.position_enu[gps_imu_matches]
+        imu_position_aligned[imu_gps_matches] - gps_position[gps_imu_matches]
     )
     lidar_gps_error = (
-        lidar_position_aligned[lidar_gps_matches] - gps.position_enu[gps_lidar_matches]
+        lidar_position_aligned[lidar_gps_matches] - gps_position[gps_lidar_matches]
     )
-    output_gps_error = (
-        output_position_aligned[output_gps_matches] - gps.position_enu[gps_output_matches]
+    gps_output_error = (
+        gps_position[gps_output_matches] - output_position_aligned[output_gps_matches]
+    )
+    output_gt_matches, gt_output_matches = nearest_matches(
+        awsim.time, mimosa_output.time, max_time_difference
+    )
+    output_gt_position_error = (
+        awsim_position_aligned[gt_output_matches]
+        - output_position_aligned[output_gt_matches]
+    )
+    output_gt_orientation_error = wrapped_angle_difference_deg(
+        awsim_rpy_aligned[gt_output_matches], output_rpy_aligned[output_gt_matches]
     )
 
     imu_error_time = imu.time[imu_gps_matches] - start_time
     lidar_error_time = lidar.time[lidar_gps_matches] - start_time
     output_error_time = mimosa_output.time[output_gps_matches] - start_time
+    output_gt_error_time = mimosa_output.time[output_gt_matches] - start_time
     figures = []
     for component in range(3):
         figures.append(
@@ -993,13 +1256,17 @@ def write_report(
                 output_time,
                 output_position_aligned,
                 gps_time,
-                gps.position_enu,
+                gps_position,
+                awsim_time,
+                awsim_position_aligned,
                 imu_error_time,
                 imu_gps_error,
                 lidar_error_time,
                 lidar_gps_error,
                 output_error_time,
-                output_gps_error,
+                gps_output_error,
+                output_gt_error_time,
+                output_gt_position_error,
             )
         )
 
@@ -1008,15 +1275,19 @@ def write_report(
             orientation_component_figure(
                 component,
                 imu_time,
-                imu.rpy_deg,
+                imu_rpy_aligned,
                 lidar_time,
-                lidar.rpy_deg,
+                lidar_rpy_aligned,
                 output_time,
-                mimosa_output.rpy_deg,
+                output_rpy_aligned,
+                awsim_time,
+                awsim_rpy_aligned,
                 matched_time,
                 orientation_delta,
                 output_orientation_error_time,
                 output_orientation_error,
+                output_gt_error_time,
+                output_gt_orientation_error,
             )
         )
 
@@ -1025,7 +1296,8 @@ def write_report(
             imu_position_aligned,
             lidar_position_aligned,
             output_position_aligned,
-            gps.position_enu,
+            gps_position,
+            awsim_position_aligned,
         )
     )
 
@@ -1047,6 +1319,7 @@ def write_report(
         lidar,
         gps,
         mimosa_output,
+        awsim,
         len(lidar_matches),
         len(output_matches),
         position_delta,
@@ -1054,7 +1327,9 @@ def write_report(
         gps_alignment,
         imu_gps_error,
         lidar_gps_error,
-        output_gps_error,
+        gps_output_error,
+        output_gt_position_error,
+        output_gt_orientation_error,
     )
     document = f"""<!doctype html>
 <html lang="en">
@@ -1072,13 +1347,16 @@ def write_report(
   </style>
 </head>
 <body>
-  <h1>Mimosa IMU/LiDAR/output/GPS comparison</h1>
-  <p class="note">LiDAR and optimized Mimosa output samples are paired to the nearest IMU sample within
-  {max_time_difference:.6g} s for orientation-difference plots. GPS is converted from WGS84 to
-  local ENU and matched within {gps_max_time_difference:.6g} s for position-error plots. The shared
-  Mimosa map frame uses {gps_alignment.upper()} alignment to GPS. NavSatFix does not contain
-  orientation, so orientation plots compare IMU, LiDAR, and optimized Mimosa output only. Source
-  traces retain their original timestamps.</p>
+  <h1>Mimosa IMU/LiDAR/output/GPS/AWSIM comparison</h1>
+  <p class="note">The AWSIM PoseStamped stream is already expressed in ROS coordinates with Z-up.
+  Mimosa and AWSIM frames are aligned independently to GPS using {gps_alignment.upper()}, and the
+  same rotations are applied to their orientations. Mimosa output is paired to the nearest AWSIM
+  ground-truth sample within {max_time_difference:.6g} s for position and orientation errors. GPS
+  is converted from WGS84 to local ENU and matched within {gps_max_time_difference:.6g} s. Each
+  position trace is relative to its own first sample, so every trace begins at (0, 0, 0). Errors
+  therefore show relative-motion differences from the start of each source. Only Mimosa output,
+  AWSIM ground truth, and their error are visible by default; the other traces can be enabled from
+  the legends. Source traces retain their original timestamps.</p>
   <h2>Summary</h2>
   {summary}
   {''.join(fragments)}
@@ -1104,23 +1382,30 @@ def main() -> int:
     load_plotly()
 
     try:
-        series, gps, mimosa_output = read_bag(
+        series, gps, mimosa_output, awsim = read_bag(
             args.bag.expanduser(),
             args.imu_topic,
             args.lidar_topic,
             args.gps_topic,
             args.odometry_topic,
+            args.awsim_topic,
         )
     except (FileNotFoundError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
 
     imu = series[args.imu_topic]
     lidar = series[args.lidar_topic]
-    if len(imu) == 0 or len(lidar) == 0 or len(gps) == 0 or len(mimosa_output) == 0:
+    if (
+        len(imu) == 0
+        or len(lidar) == 0
+        or len(gps) == 0
+        or len(mimosa_output) == 0
+        or len(awsim) == 0
+    ):
         raise SystemExit(
             "The bag contains no usable messages: "
             f"IMU={len(imu)}, LiDAR={len(lidar)}, valid GPS fixes={len(gps)}, "
-            f"Mimosa output={len(mimosa_output)}"
+            f"Mimosa output={len(mimosa_output)}, AWSIM ground truth={len(awsim)}"
         )
 
     output = args.output.expanduser() if args.output else default_output_path(args.bag.expanduser())
@@ -1131,6 +1416,7 @@ def main() -> int:
         lidar,
         gps,
         mimosa_output,
+        awsim,
         args.max_time_difference,
         args.gps_max_time_difference,
         args.gps_alignment,
