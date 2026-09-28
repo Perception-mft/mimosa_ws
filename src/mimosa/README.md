@@ -56,8 +56,27 @@ For offline processing, replay a ROS 2 bag with simulated time:
 ros2 launch mimosa mimosa_bag.launch.py profile:=enwide bag_name:=/path/to/ros2_bag viz:=true
 ```
 
-Available profiles are `enwide`, `euroc`, `hornbill`, `lapwing`, `magpie`,
-`newer_college`, and `parrot`. Input topics can be overridden with
+To run the complete M113 workflow (launch MIMOSA with RViz, record all topics,
+play an input bag, stop recording when playback finishes, and generate the
+factor-graph report), use:
+
+```bash
+ros2 run mimosa run_mimosa_bag.sh /path/to/input_bag /path/to/new_output_bag
+```
+
+The defaults can be changed with command-line flags. For example:
+
+```bash
+ros2 run mimosa run_mimosa_bag.sh \
+  --viz false --rate 0.5 --config-override /path/to/override.yaml \
+  /path/to/input_bag /path/to/new_output_bag
+```
+
+Run `ros2 run mimosa run_mimosa_bag.sh --help` for all options and passthrough
+arguments for launch, recording, playback, and report generation.
+
+Available profiles are `enwide`, `euroc`, `hornbill`, `lapwing`, `m113`,
+`magpie`, `newer_college`, and `parrot`. Input topics can be overridden with
 `imu_topic`, `lidar_topic`, `radar_topic`, and `odometry_topic` launch arguments.
 
 ### Pre-optimization debug states
