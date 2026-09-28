@@ -19,13 +19,18 @@ Geometric::Geometric(rclcpp::Node & pnh)
   logger_->info("lidar::Geometric initialized with params:\n {}", config::toString(config));
 
   Be_cloud_.reset(new pcl::PointCloud<Point>);
-
-  ivox_map_ =
-    std::make_shared<IncrementalVoxelMapPCL>(config.scan_to_map.target_ivox_map_leaf_size);
-  ivox_map_->underlying()->set_lru_horizon(config.lru_horizon);
-  ivox_map_->underlying()->set_neighbor_voxel_mode(config.neighbor_voxel_mode);
-  ivox_map_->underlying()->voxel_insertion_setting().set_min_dist_in_cell(
-    config.scan_to_map.target_ivox_map_min_dist_in_voxel);
+  kiss_icp::pipeline::KISSConfig kiss_config;
+  kiss_config.voxel_size = config.scan_to_map.voxel_size;
+  kiss_config.max_range = config.scan_to_map.max_range;
+  kiss_config.min_range = config.scan_to_map.min_range;
+  kiss_config.max_points_per_voxel = config.scan_to_map.max_points_per_voxel;
+  kiss_config.min_motion_th = config.scan_to_map.min_motion_threshold;
+  kiss_config.initial_threshold = config.scan_to_map.initial_threshold;
+  kiss_config.max_num_iterations = config.scan_to_map.max_num_iterations;
+  kiss_config.convergence_criterion = config.scan_to_map.convergence_criterion;
+  kiss_config.max_num_threads = config.scan_to_map.max_num_threads;
+  kiss_config.deskew = config.scan_to_map.deskew;
+  kiss_icp_ = std::make_unique<kiss_icp::pipeline::KissICP>(kiss_config);
 
   pub_sm_cloud_ = pnh.create_publisher<sensor_msgs::msg::PointCloud2>("lidar/geometric/sm_cloud", 1);
   pub_sm_cloud_ds_ = pnh.create_publisher<sensor_msgs::msg::PointCloud2>("lidar/geometric/sm_cloud_ds", 1);
@@ -43,132 +48,51 @@ Geometric::Geometric(rclcpp::Node & pnh)
   keyframe_poses_.header.frame_id = config.map_frame;
 }
 
-/**
- * @brief Performs one-shot voxel grid downsampling using the iVox logic.
- * @tparam PointT The PCL point type (e.g., pcl::PointXYZ, pcl::PointXYZI).
- * @param input_cloud The input point cloud.
- * @param leaf_size The size of the voxel cube side.
- * @param max_points_per_voxel Maximum number of points to keep within a single voxel.
- * @param min_dist_in_voxel Minimum distance between points kept within the same voxel.
- * @return A new point cloud containing the downsampled points.
- */
-void Geometric::downsample(
-  const pcl::PointCloud<Point> & input_cloud, pcl::PointCloud<Point> & output_cloud,
-  const double leaf_size, const size_t max_points_per_voxel, const double min_dist_in_voxel)
-{
-  Stopwatch sw;
-
-  const double inv_leaf_size = 1.0 / leaf_size;
-  const FlatContainerMinimal::Setting voxel_settings{
-    min_dist_in_voxel * min_dist_in_voxel, max_points_per_voxel};
-
-  // Map from voxel coordinates to the container holding points for that voxel
-  size_t flat_voxels_used = 0;
-  flat_voxels_.reserve(input_cloud.size() / 2);  // Rough estimate
-  voxels_.clear();
-  voxels_.reserve(input_cloud.size() / 2);
-
-  debug_msg_.t_preprocess1 = sw.tickMs();
-
-  // Iterate through input points and assign them to voxels
-  for (size_t i = 0; i < input_cloud.size(); ++i) {
-    // Get point coordinates as Eigen vector
-    // Assuming PointT has x, y, z members
-    const Eigen::Vector4d point_pos = input_cloud.points[i].getVector4fMap().cast<double>();
-
-    // Calculate integer voxel coordinates
-    const Eigen::Vector3i coord = fast_floor(point_pos * inv_leaf_size).head<3>();
-
-    auto found = voxels_.find(coord);
-    if (found == voxels_.end()) {
-      size_t idx;
-      if (flat_voxels_used < flat_voxels_.size()) {
-        // Reuse existing container
-        flat_voxels_[flat_voxels_used].clear();
-        idx = flat_voxels_used++;
-      } else {
-        // Only allocate if we truly need more
-        idx = flat_voxels_.size();
-        flat_voxels_.emplace_back(voxel_settings);
-        flat_voxels_used = flat_voxels_.size();
-        logger_->trace("Allocated new flat voxel container, total now {}", flat_voxels_.size());
-      }
-
-      found = voxels_.emplace_hint(found, coord, idx);
-    }
-
-    flat_voxels_[found->second].add(voxel_settings, point_pos.head<3>(), i);
-  }
-
-  debug_msg_.t_preprocess2 = sw.tickMs();
-
-  // Collect points from all voxels
-  indices_.clear();
-  indices_.reserve(flat_voxels_used * max_points_per_voxel);
-  for (size_t i = 0; i < flat_voxels_used; ++i) {
-    indices_.insert(
-      indices_.end(), flat_voxels_[i].get_indices().begin(), flat_voxels_[i].get_indices().end());
-  }
-
-  // Resize the output cloud to fit the selected points
-  output_cloud.clear();
-  output_cloud.reserve(indices_.size());
-  for (const size_t idx : indices_) {
-    output_cloud.points.push_back(input_cloud.points[idx]);
-  }
-  // Set the output cloud properties
-  output_cloud.header = input_cloud.header;
-  output_cloud.is_dense = true;
-  output_cloud.width = output_cloud.size();
-  output_cloud.height = 1;
-
-  debug_msg_.t_preprocess3 = sw.tickMs();
-}
-
 void Geometric::preprocess(
-  const pcl::PointCloud<Point> & points_deskewed, const std::vector<size_t> & idxs, const double ts)
+  const pcl::PointCloud<Point> & points_raw, const std::vector<size_t> & idxs, const double ts)
 {
   if (!config.enabled) return;
 
   Stopwatch sw;
   logger_->trace("Preprocess start");
-
-  static bool first = true;
-  if (first) {
-    first = false;
-
-    // Excessive reserving to avoid reallocations later
-    Be_cloud_->reserve(points_deskewed.size());
-    flat_voxels_.reserve(points_deskewed.size());
-    voxels_.reserve(points_deskewed.size());
-    indices_.reserve(points_deskewed.size());
-    sm_Be_cloud_ds_.reserve(points_deskewed.size());
-  }
-
   ts_ = ts;
-
-  // Clear the previous cloud
   Be_cloud_->clear();
-  Be_cloud_->reserve(idxs.size());
+  Be_cloud_->reserve(points_raw.size());
+  kiss_frame_.clear();
+  kiss_frame_.reserve(points_raw.size());
+  kiss_timestamps_.clear();
+  kiss_timestamps_.reserve(points_raw.size());
 
   const M3F R_B_L = config.T_B_L.rotation().matrix().cast<float>();
   const V3F t_B_L = config.T_B_L.translation().cast<float>();
 
-  std::for_each(idxs.begin(), idxs.end(), [&](const size_t idx) {
-    // Transform the point from the Le frame to the Be frame
-    auto & p = Be_cloud_->points.emplace_back(points_deskewed[idx]);
+  // The standalone KISS frontend gives the pipeline every input point. KISS's
+  // own range filter and two-stage voxelizer perform all scan reduction.
+  (void)idxs;
+  for (const Point & input : points_raw) {
+    auto & p = Be_cloud_->points.emplace_back(input);
     p.getVector3fMap() = R_B_L * p.getVector3fMap() + t_B_L;
-  });
-  // Set the sizes since these are invalidated by the above loop that works directly on the points
+    kiss_frame_.emplace_back(p.getVector3fMap().cast<double>());
+    kiss_timestamps_.emplace_back(static_cast<double>(p.t));
+  }
   Be_cloud_->width = Be_cloud_->size();
   Be_cloud_->height = 1;
 
-  downsample(
-    *Be_cloud_, sm_Be_cloud_ds_, config.scan_to_map.source_voxel_grid_filter_leaf_size, 20,
-    config.scan_to_map.source_voxel_grid_min_dist_in_voxel);
+  // This is the same normalization done by KISS-ICP's ROS adapter.
+  if (kiss_timestamps_.size() > 1) {
+    const auto [min_it, max_it] =
+      std::minmax_element(kiss_timestamps_.cbegin(), kiss_timestamps_.cend());
+    const double min_time = *min_it;
+    const double duration = *max_it - min_time;
+    if (duration > 0.0) {
+      for (double & stamp : kiss_timestamps_) stamp = (stamp - min_time) / duration;
+    } else {
+      kiss_timestamps_.clear();
+    }
+  }
 
-  debug_msg_.n_points_in = points_deskewed.size();
-  debug_msg_.n_points_in_sm_ds = sm_Be_cloud_ds_.size();
+  debug_msg_.n_points_in = points_raw.size();
+  debug_msg_.n_points_in_sm_ds = 0;
 
   logger_->trace("Preprocess end");
   debug_msg_.t_preprocess = sw.elapsedMs();
@@ -193,10 +117,48 @@ void Geometric::getFactors(
 
   Stopwatch sw;
 
-  // Scan to map
-  factor_ = std::make_shared<ICPFactor>(key, ivox_map_, sm_Be_cloud_ds_, config.scan_to_map);
-  // The factor_ is linearized so that localizability can be computed
-  auto tmp = factor_->linearize(values);
+  (void)values;
+  if (kiss_frame_.empty()) {
+    logger_->warn("Skipping KISS-ICP factor for an empty LiDAR frame");
+    factor_.reset();
+    eigenvectors_block_matrix.setIdentity();
+    degen_directions.setOnes();
+    return;
+  }
+
+  // This single call is the exact standalone KISS-ICP algorithm. Internally it
+  // performs deskew, two-stage voxelization, adaptive-threshold registration,
+  // constant-velocity prediction, map insertion, and delta/pose updates.
+  const auto [frame, source] = kiss_icp_->RegisterFrame(kiss_frame_, kiss_timestamps_);
+
+  Be_cloud_->clear();
+  Be_cloud_->reserve(frame.size());
+  for (const V3D & p : frame) {
+    Point point;
+    point.getVector3fMap() = p.cast<float>();
+    Be_cloud_->push_back(point);
+  }
+  sm_Be_cloud_ds_.clear();
+  sm_Be_cloud_ds_.reserve(source.size());
+  for (const V3D & p : source) {
+    Point point;
+    point.getVector3fMap() = p.cast<float>();
+    sm_Be_cloud_ds_.push_back(point);
+  }
+  debug_msg_.n_points_in_sm_ds = source.size();
+
+  const Sophus::SE3d & kiss_pose = kiss_icp_->pose();
+  if (!kiss_pose.matrix().allFinite()) {
+    logger_->error("KISS-ICP returned a non-finite pose; skipping its GTSAM factor");
+    factor_.reset();
+    eigenvectors_block_matrix.setIdentity();
+    degen_directions.setOnes();
+    return;
+  }
+  const gtsam::Pose3 T_K_B(
+    gtsam::Rot3(kiss_pose.rotationMatrix()), kiss_pose.translation());
+  const gtsam::Pose3 measured_pose = T_W_K_ * T_K_B;
+  factor_ = std::make_shared<KISSICPFactor>(key, measured_pose, config.scan_to_map);
 
   if (pub_sm_correspondances_ma_->get_subscription_count()) {
     visualization_msgs::msg::MarkerArray ma;
@@ -280,7 +242,7 @@ void Geometric::getFactors(
   convert(localizability_trans_final, debug_msg_.localizability_trans_final);
   convert(localizability_rot_final, debug_msg_.localizability_rot_final);
 
-  const std::vector<ICPFactor::RejectStatus> & statuses = factor_->getStatuses();
+  const std::vector<KISSICPFactor::RejectStatus> & statuses = factor_->getStatuses();
   debug_msg_.n_unprocessed = 0;
   debug_msg_.n_rejected_insufficient_corres_points = 0;
   debug_msg_.n_rejected_max_corres_dist = 0;
@@ -292,31 +254,31 @@ void Geometric::getFactors(
   debug_msg_.n_correspondances = 0;
   for (size_t i = 0; i < statuses.size(); i++) {
     switch (statuses[i]) {
-      case ICPFactor::RejectStatus::Unprocessed:
+      case KISSICPFactor::RejectStatus::Unprocessed:
         debug_msg_.n_unprocessed++;
         break;
-      case ICPFactor::RejectStatus::InsufficientCorresPoints:
+      case KISSICPFactor::RejectStatus::InsufficientCorresPoints:
         debug_msg_.n_rejected_insufficient_corres_points++;
         break;
-      case ICPFactor::RejectStatus::CorresMaxDist:
+      case KISSICPFactor::RejectStatus::CorresMaxDist:
         debug_msg_.n_rejected_max_corres_dist++;
         break;
-      case ICPFactor::RejectStatus::EigenSolverFail:
+      case KISSICPFactor::RejectStatus::EigenSolverFail:
         debug_msg_.n_rejected_eigensolver_fail++;
         break;
-      case ICPFactor::RejectStatus::MinEigenValueLow:
+      case KISSICPFactor::RejectStatus::MinEigenValueLow:
         debug_msg_.n_rejected_min_eigen_value_low++;
         break;
-      case ICPFactor::RejectStatus::Line:
+      case KISSICPFactor::RejectStatus::Line:
         debug_msg_.n_rejected_line++;
         break;
-      case ICPFactor::RejectStatus::CorresPlaneInvalid:
+      case KISSICPFactor::RejectStatus::CorresPlaneInvalid:
         debug_msg_.n_rejected_plane++;
         break;
-      case ICPFactor::RejectStatus::MaxError:
+      case KISSICPFactor::RejectStatus::MaxError:
         debug_msg_.n_rejected_max_error++;
         break;
-      case ICPFactor::RejectStatus::Valid:
+      case KISSICPFactor::RejectStatus::Valid:
         debug_msg_.n_correspondances++;
         break;
 
@@ -331,17 +293,17 @@ void Geometric::getFactors(
 }
 
 void Geometric::fillMarkerArray(
-  const ICPFactor & factor, visualization_msgs::msg::MarkerArray & ma, const std::string & frame_id,
-  const double ts)
+  const KISSICPFactor & factor, visualization_msgs::msg::MarkerArray & ma,
+  const std::string & frame_id, const double ts)
 {
-  const std::vector<ICPFactor::RejectStatus> & statuses = factor.getStatuses();
+  const std::vector<KISSICPFactor::RejectStatus> & statuses = factor.getStatuses();
   const std::vector<V3D> & corres_means_target = factor.getCorresMeansTarget();
-  const std::vector<V3D> & corres_normals_target = factor.getCorresNormalsTarget();
+  const std::vector<V3D> & transformed_source = factor.getTransformedSource();
 
   visualization_msgs::msg::Marker triangles;
   triangles.header.frame_id = frame_id;
   triangles.header.stamp = toStamp(ts);
-  triangles.ns = "planes";
+  triangles.ns = "kiss_icp_targets";
   triangles.id = 0;
   triangles.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
   triangles.action = visualization_msgs::msg::Marker::ADD;
@@ -357,7 +319,7 @@ void Geometric::fillMarkerArray(
   visualization_msgs::msg::Marker normals;
   normals.header.frame_id = frame_id;
   normals.header.stamp = toStamp(ts);
-  normals.ns = "normals";
+  normals.ns = "kiss_icp_correspondences";
   normals.id = 0;
   normals.type = visualization_msgs::msg::Marker::LINE_LIST;
   normals.action = visualization_msgs::msg::Marker::ADD;
@@ -368,17 +330,18 @@ void Geometric::fillMarkerArray(
   normals.color.b = 0.0;
   normals.color.a = 1.0;
 
-  float triangle_size = config.scan_to_map.source_voxel_grid_filter_leaf_size;
-  float normal_length = config.scan_to_map.source_voxel_grid_filter_leaf_size;
+  float triangle_size = config.scan_to_map.voxel_size;
 
   for (size_t i = 0; i < corres_means_target.size(); i++) {
-    if (statuses[i] != ICPFactor::RejectStatus::Valid) {
+    if (statuses[i] != KISSICPFactor::RejectStatus::Valid) {
       continue;
     }
 
-    // Current point and normal
+    // Target point and its point-to-point KISS-ICP correspondence.
     const Eigen::Vector3d & p = corres_means_target[i];
-    const Eigen::Vector3d & n = corres_normals_target[i];
+    const Eigen::Vector3d delta = transformed_source[i] - p;
+    const Eigen::Vector3d n =
+      delta.squaredNorm() > 1e-12 ? delta.normalized() : Eigen::Vector3d::UnitZ();
 
     // Create vertices for the triangle with centroid p
     Eigen::Vector3d u = n.unitOrthogonal();       // Vector orthogonal to the normal
@@ -410,14 +373,14 @@ void Geometric::fillMarkerArray(
     vertex.z = p3.z();
     triangles.points.push_back(vertex);
 
-    // Add the normal line (from point to point + normal)
+    // Draw the residual from the map point to the transformed scan point.
     geometry_msgs::msg::Point start, end;
     start.x = p.x();
     start.y = p.y();
     start.z = p.z();
-    end.x = p.x() + n.x() * normal_length;
-    end.y = p.y() + n.y() * normal_length;
-    end.z = p.z() + n.z() * normal_length;
+    end.x = transformed_source[i].x();
+    end.y = transformed_source[i].y();
+    end.z = transformed_source[i].z();
 
     normals.points.push_back(start);
     normals.points.push_back(end);
@@ -438,6 +401,31 @@ void Geometric::updateMap(const gtsam::Key key, const gtsam::Values & values)
   }
 
   const gtsam::Pose3 & T_W_Be = values.at<gtsam::Pose3>(key);
+
+  if (!kiss_pose_initialized_) {
+    // KISS keeps its own odometry frame with the first pose at identity. T_W_K
+    // connects that frame to Mimosa's graph/world frame for the GTSAM factor.
+    T_W_K_ = T_W_Be;
+    if (!kiss_frame_.empty()) {
+      const auto [frame, source] = kiss_icp_->RegisterFrame(kiss_frame_, kiss_timestamps_);
+      Be_cloud_->clear();
+      Be_cloud_->reserve(frame.size());
+      for (const V3D & p : frame) {
+        Point point;
+        point.getVector3fMap() = p.cast<float>();
+        Be_cloud_->push_back(point);
+      }
+      sm_Be_cloud_ds_.clear();
+      sm_Be_cloud_ds_.reserve(source.size());
+      for (const V3D & p : source) {
+        Point point;
+        point.getVector3fMap() = p.cast<float>();
+        sm_Be_cloud_ds_.push_back(point);
+      }
+      debug_msg_.n_points_in_sm_ds = source.size();
+    }
+    kiss_pose_initialized_ = true;
+  }
 
   bool update_map = true;
   if (map_poses_.size()) {
@@ -481,21 +469,9 @@ void Geometric::updateMap(const gtsam::Key key, const gtsam::Values & values)
   }
 
   if (update_map) {
-    // Transform the cloud to map frame using the T_W_Be
     Stopwatch sw;
-    const M3F R_W_Be = T_W_Be.rotation().matrix().cast<float>();
-    const V3F t_W_Be = T_W_Be.translation().cast<float>();
-
-    // Transform and insert the cloud into the map
-    std::vector<V3F> W_points(Be_cloud_->size());
-    for (size_t i = 0; i < Be_cloud_->size(); i++) {
-      W_points[i] = R_W_Be * Be_cloud_->points[i].getVector3fMap() + t_W_Be;
-    }
-    gtsam_points::PointCloudCPU::Ptr frame =
-      std::make_shared<gtsam_points::PointCloudCPU>(W_points);
-    // Reset the map to a new map
-    ivox_map_ = std::make_shared<IncrementalVoxelMapPCL>(*ivox_map_);
-    ivox_map_->underlying()->insert(*frame);
+    // The KISS map is updated for every frame in getFactors(). Keyframes are
+    // retained only for Mimosa's visualization and bookkeeping.
     debug_msg_.t_insertion = sw.lapMs();
 
     map_poses_.push_back(T_W_Be);
@@ -505,8 +481,14 @@ void Geometric::updateMap(const gtsam::Key key, const gtsam::Values & values)
 
     if (pub_map_->get_subscription_count()) {
       // Publish the updated map
-      pcl::PointCloud<Point>::Ptr W_map = ivox_map_->getCloud();
-      publishCloud(pub_map_, *W_map, config.map_frame, ts_);
+      pcl::PointCloud<Point> W_map;
+      for (const V3D & point_K : kiss_icp_->LocalMap()) {
+        const V3D point_W = T_W_K_ * point_K;
+        Point point;
+        point.getVector3fMap() = point_W.cast<float>();
+        W_map.push_back(point);
+      }
+      publishCloud(pub_map_, W_map, config.map_frame, ts_);
     }
 
     keyframe_poses_.header.stamp = toStamp(ts_);

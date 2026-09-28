@@ -81,19 +81,20 @@ lidar:
     map_keyframe_trans_thresh: 2
     map_keyframe_rot_thresh_deg: 30
     initial_clouds_to_force_map_update: 1 # number of initial pointclouds to force map update regardless of movement. This is useful in case of lidars with non repeating scan patterns to ensure good initial map coverage.
-    lru_horizon: 1000
-    neighbor_voxel_mode: 19
     scan_to_map:
-      source_voxel_grid_filter_leaf_size: 0.5
-      source_voxel_grid_min_dist_in_voxel: 0.15
-      target_ivox_map_leaf_size: 0.5
-      target_ivox_map_min_dist_in_voxel: 0.15
-      num_corres_points: 5
-      max_corres_distance: 1
-      plane_validity_distance: 0.07
-      lidar_point_noise_std_dev: 0.07
-      use_huber: true
-      huber_threshold: 1.345
+      voxel_size: 0.5
+      max_range: 100
+      min_range: 0.5
+      max_points_per_voxel: 20
+      initial_threshold: 2.0
+      min_motion_threshold: 0.1
+      max_num_iterations: 500
+      convergence_criterion: 0.0001
+      max_num_threads: 0
+      deskew: true
+      lidar_pose_translation_std_dev: 0.10
+      lidar_pose_rotation_std_dev_deg: 2.0
+      lidar_information_weight: 1.0
       reg_4_dof: false
       project_on_degneneracy: false
       degen_thresh_trans: 40 # 0.01 # m

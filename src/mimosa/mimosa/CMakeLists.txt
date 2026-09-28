@@ -20,6 +20,21 @@ find_package(gtsam_points REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(PCL REQUIRED)
 find_package(spdlog REQUIRED)
+find_package(TBB REQUIRED)
+
+# Use the exact KISS-ICP implementation supplied with this workspace.
+set(KISS_ICP_SOURCE_DIR "/home/tal/git_repos/icp/src/kiss-icp/cpp/kiss_icp" CACHE PATH
+  "Path to the KISS-ICP C++ source directory")
+set(KISS_ICP_BUILD_DIR "/home/tal/git_repos/icp/build/kiss_icp/kiss_icp" CACHE PATH
+  "Path to the built KISS-ICP C++ libraries")
+set(KISS_ICP_DEPS_DIR "/home/tal/git_repos/icp/build/kiss_icp/_deps" CACHE PATH
+  "Path to the KISS-ICP build dependencies")
+add_library(kiss_icp_core STATIC IMPORTED)
+set_target_properties(kiss_icp_core PROPERTIES
+  IMPORTED_LOCATION "${KISS_ICP_BUILD_DIR}/core/libkiss_icp_core.a")
+add_library(kiss_icp_pipeline STATIC IMPORTED)
+set_target_properties(kiss_icp_pipeline PROPERTIES
+  IMPORTED_LOCATION "${KISS_ICP_BUILD_DIR}/pipeline/libkiss_icp_pipeline.a")
 
 file(GLOB_RECURSE MIMOSA_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/*.cpp
@@ -34,13 +49,17 @@ target_compile_definitions(${PROJECT_NAME}_lib PUBLIC USE_OPENMP=1)
 target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+  ${PCL_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS}
+  ${KISS_ICP_SOURCE_DIR}/..
+  ${KISS_ICP_DEPS_DIR}/sophus-src
+  ${KISS_ICP_DEPS_DIR}/tessil-src/include)
 ament_target_dependencies(${PROJECT_NAME}_lib
   cv_bridge geometry_msgs mimosa_msgs nav_msgs pcl_conversions rclcpp
   sensor_msgs std_msgs tf2_ros visualization_msgs)
 target_link_libraries(${PROJECT_NAME}_lib
   config_utilities::config_utilities ${PCL_LIBRARIES} gtsam gtsam_unstable
-  gtsam_points::gtsam_points ${OpenCV_LIBS} spdlog::spdlog OpenMP::OpenMP_CXX)
+  gtsam_points::gtsam_points ${OpenCV_LIBS} spdlog::spdlog OpenMP::OpenMP_CXX
+  kiss_icp_pipeline kiss_icp_core TBB::tbb)
 
 add_executable(mimosa_node src/mimosa_node.cpp)
 target_link_libraries(mimosa_node ${PROJECT_NAME}_lib)

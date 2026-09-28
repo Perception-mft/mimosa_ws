@@ -19,7 +19,6 @@
 // mimosa
 #include "mimosa/lidar/geometric_config.hpp"
 #include "mimosa/lidar/geometric_factor.hpp"
-#include "mimosa/lidar/incremental_voxel_map.hpp"
 #include "mimosa/lidar/utils.hpp"
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
@@ -28,6 +27,8 @@
 
 // ROS
 #include <geometry_msgs/msg/pose_array.hpp>
+
+#include <kiss_icp/pipeline/KissICP.hpp>
 
 namespace mimosa
 {
@@ -44,17 +45,16 @@ private:
   // Member variables
   pcl::PointCloud<Point>::Ptr Be_cloud_;
   pcl::PointCloud<Point> sm_Be_cloud_ds_;
-  ICPFactor::Ptr factor_;
+  KISSICPFactor::Ptr factor_;
+  std::unique_ptr<kiss_icp::pipeline::KissICP> kiss_icp_;
+  std::vector<Eigen::Vector3d> kiss_frame_;
+  std::vector<double> kiss_timestamps_;
+  gtsam::Pose3 T_W_K_;
+  bool kiss_pose_initialized_ = false;
 
   // Variables for map
-  IncrementalVoxelMapPCL::Ptr ivox_map_;
   std::vector<gtsam::Pose3> map_poses_;
   geometry_msgs::msg::PoseArray keyframe_poses_;
-
-  // Variables for downsampling
-  std::vector<FlatContainerMinimal> flat_voxels_;
-  std::unordered_map<Eigen::Vector3i, size_t, XORVector3iHash> voxels_;
-  std::vector<size_t> indices_;
 
   double ts_;
   mimosa_msgs::msg::LidarGeometricDebug debug_msg_;
@@ -69,17 +69,12 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_keyframe_poses_;
 
   void fillMarkerArray(
-    const ICPFactor & factor, visualization_msgs::msg::MarkerArray & ma, const std::string & frame_id,
-    const double ts);
-  void downsample(
-    const pcl::PointCloud<Point> & input_cloud, pcl::PointCloud<Point> & output_cloud,
-    const double leaf_size, const size_t max_points_per_voxel = 20,
-    const double min_dist_in_voxel = 0.1);
-
+    const KISSICPFactor & factor, visualization_msgs::msg::MarkerArray & ma,
+    const std::string & frame_id, const double ts);
 public:
   Geometric(rclcpp::Node & pnh);
   void preprocess(
-    const pcl::PointCloud<Point> & points_deskewed, const std::vector<size_t> & idxs,
+    const pcl::PointCloud<Point> & points_raw, const std::vector<size_t> & idxs,
     const double ts);
   void getFactors(
     const gtsam::Key & key, const gtsam::Values & values, gtsam::NonlinearFactorGraph & graph,

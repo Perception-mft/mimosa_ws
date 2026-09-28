@@ -14,38 +14,37 @@ void declare_config(RegistrationConfig & config)
 {
   using namespace config;
   name("Registration Config");
-  field(config.source_voxel_grid_filter_leaf_size, "source_voxel_grid_filter_leaf_size", "m");
-  field(config.source_voxel_grid_min_dist_in_voxel, "source_voxel_grid_min_dist_in_voxel", "m");
-  field(config.target_ivox_map_leaf_size, "target_ivox_map_leaf_size", "m");
-  field(config.target_ivox_map_min_dist_in_voxel, "target_ivox_map_min_dist_in_voxel", "m");
-  field(config.num_corres_points, "num_corres_points", "num");
-  field(config.max_corres_distance, "max_corres_distance", "m");
-  field(config.plane_validity_distance, "plane_validity_distance", "m");
-  field(config.lidar_point_noise_std_dev, "lidar_point_noise_std_dev", "m");
-  field(config.use_huber, "use_huber", "bool");
-  field(config.huber_threshold, "huber_threshold", "amount in standard deviations");
+  field(config.voxel_size, "voxel_size", "m");
+  field(config.max_range, "max_range", "m");
+  field(config.min_range, "min_range", "m");
+  field(config.max_points_per_voxel, "max_points_per_voxel", "num");
+  field(config.initial_threshold, "initial_threshold", "m");
+  field(config.min_motion_threshold, "min_motion_threshold", "m");
+  field(config.max_num_iterations, "max_num_iterations", "num");
+  field(config.convergence_criterion, "convergence_criterion", "SE(3) tangent norm");
+  field(config.max_num_threads, "max_num_threads", "num (0 uses TBB default)");
+  field(config.deskew, "deskew", "bool");
+  field(config.lidar_pose_translation_std_dev, "lidar_pose_translation_std_dev", "m");
+  field(config.lidar_pose_rotation_std_dev_deg, "lidar_pose_rotation_std_dev_deg", "deg");
+  field(config.lidar_information_weight, "lidar_information_weight", "scale");
   field(config.reg_4_dof, "reg_4_dof", "bool");
   field(config.project_on_degneneracy, "project_on_degneneracy", "bool");
   field(config.degen_thresh_rot, "degen_thresh_rot", "num_virtual_features");
   field(config.degen_thresh_trans, "degen_thresh_trans", "num_virtual_features");
 
-  check(config.source_voxel_grid_filter_leaf_size, GE, 0.01, "source_voxel_grid_filter_leaf_size");
-  check(
-    config.source_voxel_grid_min_dist_in_voxel, GE, 0.01, "source_voxel_grid_min_dist_in_voxel");
-  checkCondition(
-    config.source_voxel_grid_min_dist_in_voxel < config.source_voxel_grid_filter_leaf_size,
-    "source_voxel_grid_min_dist_in_voxel should be smaller than "
-    "source_voxel_grid_filter_leaf_size");
-  check(config.target_ivox_map_leaf_size, GE, 0.01, "target_ivox_map_leaf_size");
-  check(config.target_ivox_map_min_dist_in_voxel, GE, 0.01, "target_ivox_map_min_dist_in_voxel");
-  checkCondition(
-    config.target_ivox_map_min_dist_in_voxel < config.target_ivox_map_leaf_size,
-    "target_ivox_map_min_dist_in_voxel should be smaller than target_ivox_map_leaf_size");
-  check(config.num_corres_points, GE, 3, "num_corres_points");
-  check(config.max_corres_distance, GT, 0.0, "max_corres_distance");
-  check(config.plane_validity_distance, GT, 0.0, "plane_validity_distance");
-  check(config.lidar_point_noise_std_dev, GT, 0.0, "lidar_point_noise_std_dev");
-  check(config.huber_threshold, GE, 0.0, "huber_threshold");
+  check(config.voxel_size, GE, 0.01, "voxel_size");
+  check(config.max_range, GT, 0.0, "max_range");
+  check(config.min_range, GE, 0.0, "min_range");
+  checkCondition(config.min_range < config.max_range, "min_range must be smaller than max_range");
+  check(config.max_points_per_voxel, GE, 1, "max_points_per_voxel");
+  check(config.initial_threshold, GT, 0.0, "initial_threshold");
+  check(config.min_motion_threshold, GE, 0.0, "min_motion_threshold");
+  check(config.max_num_iterations, GE, 1, "max_num_iterations");
+  check(config.convergence_criterion, GT, 0.0, "convergence_criterion");
+  check(config.max_num_threads, GE, 0, "max_num_threads");
+  check(config.lidar_pose_translation_std_dev, GT, 0.0, "lidar_pose_translation_std_dev");
+  check(config.lidar_pose_rotation_std_dev_deg, GT, 0.0, "lidar_pose_rotation_std_dev_deg");
+  check(config.lidar_information_weight, GT, 0.0, "lidar_information_weight");
 }
 
 void declare_config(GeometricConfig & config)
@@ -72,21 +71,12 @@ void declare_config(GeometricConfig & config)
       field(config.map_keyframe_trans_thresh, "map_keyframe_trans_thresh", "m");
       field(config.map_keyframe_rot_thresh_deg, "map_keyframe_rot_thresh_deg", "deg");
       field(config.initial_clouds_to_force_map_update, "initial_clouds_to_force_map_update", "num");
-      field(config.lru_horizon, "lru_horizon", "num");
-      field(config.neighbor_voxel_mode, "neighbor_voxel_mode", "num");
-
       field(config.scan_to_map, "scan_to_map");
     }
   }
 
   check(config.point_skip_divisor, GE, 1, "point_skip_divisor");
   check(config.ring_skip_divisor, GE, 1, "ring_skip_divisor");
-  std::vector<size_t> neighbor_voxel_mode_values = {1, 7, 19, 27};
-  check(
-    std::find(
-      neighbor_voxel_mode_values.begin(), neighbor_voxel_mode_values.end(),
-      config.neighbor_voxel_mode) != neighbor_voxel_mode_values.end(),
-    EQ, true, "neighbor_voxel_mode");
 }
 
 }  // namespace lidar

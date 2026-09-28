@@ -409,11 +409,10 @@ void Manager::prepareInput(const sensor_msgs::msg::PointCloud2::ConstSharedPtr m
     "Filtering done, header ts: {}, corrected ts: {}, points_full_size: {}, duration: {}",
     header_ts_, corrected_ts_, points_full_.size(), corrected_ts_ - header_ts_);
 
-  // Save a copy of the raw points. This is needed by photometric
-  if (photometric_->config.enabled) {
-    points_raw_.clear();
-    points_raw_ = points_full_;
-  }
+  // KISS-ICP performs its own constant-velocity deskewing from the raw scan.
+  // Photometric processing also needs the unmodified points.
+  points_raw_.clear();
+  points_raw_ = points_full_;
 
   debug_msg_.t_preprocess = sw.elapsedMs();
 }
@@ -553,7 +552,7 @@ void Manager::preprocess(const gtsam::Key key)
 
   photometric_->preprocess(
     points_raw_, points_full_, interpolated_map_T_Le_Lt_, corrected_ts_, key);
-  geometric_->preprocess(points_full_, geometric_point_idxs_, corrected_ts_);
+  geometric_->preprocess(points_raw_, geometric_point_idxs_, corrected_ts_);
 
   debug_msg_.t_preprocess_geo_photo = sw_preprocess.elapsedMs();
 }

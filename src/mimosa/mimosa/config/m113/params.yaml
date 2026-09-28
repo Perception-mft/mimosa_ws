@@ -71,7 +71,7 @@ lidar:
     intensity_min: 0
     intensity_max: 1.0e+10
     ns_max: 1e8 # nanoseconds (used to clip out points that are after the end of the regular scan). A value of 1e8 means that any points that are more than 100ms after the start of the scan will be clipped out.
-    create_full_res_pointcloud: false
+    create_full_res_pointcloud: true
     full_res_pointcloud_publish_rate_divisor: 2
     use_reflectivity_as_intensity: false
     scale_intensity_by_sq_range: false
@@ -84,26 +84,27 @@ lidar:
     map_keyframe_trans_thresh: 1
     map_keyframe_rot_thresh_deg: 10
     initial_clouds_to_force_map_update: 1 # number of initial pointclouds to force map update regardless of movement. This is useful in case of lidars with non repeating scan patterns to ensure good initial map coverage.
-    lru_horizon: 1000
-    neighbor_voxel_mode: 19
     scan_to_map:
-      source_voxel_grid_filter_leaf_size: 1
-      source_voxel_grid_min_dist_in_voxel: 0.2
-      target_ivox_map_leaf_size: 1
-      target_ivox_map_min_dist_in_voxel: 0.2
-      num_corres_points: 5
-      max_corres_distance: 1
-      plane_validity_distance: 0.07
-      lidar_point_noise_std_dev: 0.07
-      use_huber: true
-      huber_threshold: 1.345
+      voxel_size: 1.0
+      max_range: 100
+      min_range: 0.5
+      max_points_per_voxel: 20
+      initial_threshold: 2.0
+      min_motion_threshold: 0.1
+      max_num_iterations: 500
+      convergence_criterion: 0.0001
+      max_num_threads: 0
+      deskew: true
+      lidar_pose_translation_std_dev: 0.10
+      lidar_pose_rotation_std_dev_deg: 0.3
+      lidar_information_weight: 1.0
       reg_4_dof: false
       project_on_degneneracy: false
       degen_thresh_trans: 40 # 0.01 # m
       degen_thresh_rot: 0 # 0.03 # 0.05 # deg
   photometric:
     log_level: warn
-    enabled: false
+    enabled: true
     destagger: false
     visualize: false
     range_min: 0.5 # Needed to avoid division by zero

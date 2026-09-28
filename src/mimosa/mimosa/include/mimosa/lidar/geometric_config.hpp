@@ -16,16 +16,19 @@ namespace lidar
 
 struct RegistrationConfig
 {
-  float source_voxel_grid_filter_leaf_size = 0.5;
-  float source_voxel_grid_min_dist_in_voxel = 0.1;
-  float target_ivox_map_leaf_size = 0.5;
-  float target_ivox_map_min_dist_in_voxel = 0.1;
-  size_t num_corres_points = 5;
-  float max_corres_distance = 2.24;
-  float plane_validity_distance = 0.04;
-  float lidar_point_noise_std_dev = 0.02;
-  bool use_huber = true;
-  float huber_threshold = 1.345;
+  float voxel_size = 1.0;
+  float max_range = 100.0;
+  float min_range = 0.0;
+  size_t max_points_per_voxel = 20;
+  float initial_threshold = 2.0;
+  float min_motion_threshold = 0.1;
+  int max_num_iterations = 500;
+  float convergence_criterion = 1e-4;
+  int max_num_threads = 0;
+  bool deskew = true;
+  float lidar_pose_translation_std_dev = 0.10;
+  float lidar_pose_rotation_std_dev_deg = 2.0;
+  float lidar_information_weight = 1.0;
   bool reg_4_dof = false;
   bool project_on_degneneracy = true;
   float degen_thresh_rot = 10;
@@ -50,9 +53,6 @@ struct GeometricConfig
   float map_keyframe_trans_thresh = 0.1;
   float map_keyframe_rot_thresh_deg = 10;
   size_t initial_clouds_to_force_map_update = 10;
-  size_t lru_horizon = 100;
-  size_t neighbor_voxel_mode = 7;
-
   RegistrationConfig scan_to_map;
 };
 
