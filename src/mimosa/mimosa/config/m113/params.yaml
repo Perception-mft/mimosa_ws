@@ -73,7 +73,7 @@ lidar:
     intensity_min: 0
     intensity_max: 1.0e+10
     ns_max: 1e8 # nanoseconds (used to clip out points that are after the end of the regular scan). A value of 1e8 means that any points that are more than 100ms after the start of the scan will be clipped out.
-    create_full_res_pointcloud: true
+    create_full_res_pointcloud: false
     full_res_pointcloud_publish_rate_divisor: 2
     use_reflectivity_as_intensity: false
     scale_intensity_by_sq_range: false
@@ -97,8 +97,8 @@ lidar:
       convergence_criterion: 0.0001
       max_num_threads: 0
       deskew: true
-      lidar_pose_translation_std_dev: 0.10
-      lidar_pose_rotation_std_dev_deg: 0.3
+      lidar_pose_translation_std_dev: 0.010
+      lidar_pose_rotation_std_dev_deg: 0.1
       lidar_information_weight: 1.0
       reg_4_dof: false
       project_on_degneneracy: false
@@ -106,7 +106,7 @@ lidar:
       degen_thresh_rot: 0 # 0.03 # 0.05 # deg
   photometric:
     log_level: warn
-    enabled: true
+    enabled: false
     destagger: false
     visualize: false
     range_min: 0.5 # Needed to avoid division by zero
