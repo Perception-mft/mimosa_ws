@@ -80,7 +80,8 @@ python3 src/mimosa/mimosa/scripts/factor_graph_state_report.py /path/to/ros2_bag
 ```
 
 When `--output` is omitted, the report is written to `factor_graph_report.html` inside the ROS 2 bag
-directory.
+directory. The M113 profile configuration is also copied into the report directory as `m113.yaml`
+so the parameters used for the run can be kept with the report.
 
 The report reads GPS ground truth from `/sensing/gnss/nav_sat_fix` and converts valid fixes to a
 local WGS84 ENU frame. It contains one figure for each position axis (`x`, `y`, and `z`) with the

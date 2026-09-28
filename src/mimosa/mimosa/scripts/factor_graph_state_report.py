@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import shutil
 import sqlite3
+import subprocess
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,10 +25,62 @@ DEFAULT_LIDAR_TOPIC = "/debug/lidar/state"
 DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
 DEFAULT_AWSIM_TOPIC = "/control/state/pose"
+M113_CONFIG_RELATIVE_PATH = Path("config/m113/params.yaml")
 
 go = None
 pio = None
 make_subplots = None
+
+
+def git_revision() -> Tuple[str, str]:
+    """Return the branch and commit for the checkout that generated the report."""
+    for candidate in (Path(__file__).resolve().parent, Path.cwd()):
+        try:
+            repository = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=candidate,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            branch = branch_result.stdout.strip()
+            if not branch:
+                remote_branches = subprocess.run(
+                    [
+                        "git",
+                        "branch",
+                        "--remotes",
+                        "--points-at",
+                        "HEAD",
+                        "--format=%(refname:short)",
+                    ],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                branch = next(
+                    (name for name in remote_branches if not name.endswith("/HEAD")),
+                    "detached HEAD",
+                )
+            return branch, commit
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    return "unavailable", "unavailable"
 
 
 def load_plotly() -> None:
@@ -952,6 +1006,8 @@ def wrapped_angle_difference_deg(first: np.ndarray, second: np.ndarray) -> np.nd
 
 def summary_html(
     bag_path: Path,
+    git_branch: str,
+    git_commit: str,
     imu: StateSeries,
     lidar: StateSeries,
     gps: GpsSeries,
@@ -987,6 +1043,8 @@ def summary_html(
 
     rows = [
         ("Bag", str(bag_path)),
+        ("Git branch", git_branch),
+        ("Git commit", git_commit),
         ("IMU samples", str(len(imu))),
         ("LiDAR samples", str(len(lidar))),
         ("Mimosa output samples", str(len(output))),
@@ -1152,6 +1210,7 @@ def write_report(
     gps_alignment: str,
     plotlyjs: str,
 ) -> None:
+    git_branch, git_commit = git_revision()
     start_time = min(
         imu.time[0], lidar.time[0], gps.time[0], mimosa_output.time[0], awsim.time[0]
     )
@@ -1315,6 +1374,8 @@ def write_report(
 
     summary = summary_html(
         bag_path,
+        git_branch,
+        git_commit,
         imu,
         lidar,
         gps,
@@ -1373,12 +1434,35 @@ def default_output_path(bag_path: Path) -> Path:
     return bag_path.with_name(f"{bag_path.stem}_factor_graph_report.html")
 
 
+def find_m113_config() -> Path:
+    script_path = Path(__file__).resolve()
+    candidates = (
+        script_path.parents[1] / M113_CONFIG_RELATIVE_PATH,
+        script_path.parents[2] / "share/mimosa" / M113_CONFIG_RELATIVE_PATH,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Could not find the M113 configuration; searched: {searched}")
+
+
+def copy_m113_config(output: Path, config: Path) -> Path:
+    destination = output.parent / "m113.yaml"
+    shutil.copy2(config, destination)
+    return destination
+
+
 def main() -> int:
     args = parse_args()
     if args.max_time_difference < 0.0:
         raise SystemExit("--max-time-difference must be non-negative")
     if args.gps_max_time_difference < 0.0:
         raise SystemExit("--gps-max-time-difference must be non-negative")
+    try:
+        m113_config = find_m113_config()
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
     load_plotly()
 
     try:
@@ -1422,7 +1506,9 @@ def main() -> int:
         args.gps_alignment,
         args.plotlyjs,
     )
+    copied_config = copy_m113_config(output, m113_config)
     print(f"Report written to: {output.resolve()}")
+    print(f"M113 configuration copied to: {copied_config.resolve()}")
     return 0
 
 

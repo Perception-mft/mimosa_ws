@@ -30,8 +30,12 @@ Manager::Manager(rclcpp::Node & pnh)
   callback_group_ = pnh.create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   rclcpp::SubscriptionOptions options;
   options.callback_group = callback_group_;
+  auto qos = rclcpp::SensorDataQoS().keep_last(1000);
+  if (config_.reliable_qos) {
+    qos.reliable();
+  }
   sub_ = pnh.create_subscription<sensor_msgs::msg::Imu>(
-    "imu/manager/imu_in", rclcpp::SensorDataQoS().keep_last(1000),
+    "imu/manager/imu_in", qos,
     [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { callback(msg); }, options);
 }
 
@@ -562,6 +566,7 @@ void declare_config(ManagerConfig & config)
       NameSpace ns("manager");
       field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
       field(config.ts_offset, "ts_offset", "s");
+      field(config.reliable_qos, "reliable_qos", "bool");
       field(config.max_buffer_duration, "max_buffer_duration", "s");
       field(config.pose_init_wait_secs, "pose_init_wait_secs", "s");
       field(config.interpolation_max_ts_diff, "interpolation_max_ts_diff", "s");

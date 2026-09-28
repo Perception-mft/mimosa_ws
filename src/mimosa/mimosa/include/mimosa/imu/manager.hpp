@@ -56,6 +56,7 @@ struct ManagerConfig
   std::string map_frame = "mimosa_map";
   std::string body_frame = "mimosa_body";
   float ts_offset = 0.0;                   // s
+  bool reliable_qos = false;
   float max_buffer_duration = 2.0;         // s
   float pose_init_wait_secs = 1.0;         // s
   float interpolation_max_ts_diff = 0.01;  // s

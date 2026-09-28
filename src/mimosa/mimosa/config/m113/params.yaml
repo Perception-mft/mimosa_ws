@@ -7,7 +7,8 @@ imu:
   manager:
     log_level: warn
     ts_offset: 0
-    max_buffer_duration: 4
+    reliable_qos: true
+    max_buffer_duration: 30
     pose_init_wait_secs: 1
     interpolation_max_ts_diff: 1 #s
     extrapolation_max_ts_diff: 0.15 #s
@@ -62,6 +63,7 @@ lidar:
     log_level: warn
     enabled: true
     use_to_init: true
+    reliable_qos: true
     initial_skip: 2 # number of initial pointclouds to drop
     transpose_pointcloud: false # Transpose the pointcloud to have height correspond to the number of rings and width correspond to the number of points per ring
     organize_pointcloud_by_ring: true # Only needed if the pointcloud is not already provided in a row major order by ring (Currently only required for Hesai JT128)
@@ -147,6 +149,7 @@ radar:
     log_level: warn
     use_to_init: false
     enabled: false
+    reliable_qos: false
     initial_skip: 2 # number of initial pointclouds to drop
     ts_offset: 0
     is_exposure_compensated: false # If false, then the timestamp will be shifted by frame_ms/2
@@ -165,6 +168,7 @@ odometry:
     log_level: warn
     enabled: true
     use_to_init: false
+    reliable_qos: false
     initial_skip: 2 # number of initial messages to drop
     ts_offset: 0
     d_opt_thresh: 1
