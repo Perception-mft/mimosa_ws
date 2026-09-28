@@ -8,6 +8,7 @@ import html
 import math
 import shutil
 import sqlite3
+import subprocess
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,57 @@ M113_CONFIG_RELATIVE_PATH = Path("config/m113/params.yaml")
 go = None
 pio = None
 make_subplots = None
+
+
+def git_revision() -> Tuple[str, str]:
+    """Return the branch and commit for the checkout that generated the report."""
+    for candidate in (Path(__file__).resolve().parent, Path.cwd()):
+        try:
+            repository = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=candidate,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            branch = branch_result.stdout.strip()
+            if not branch:
+                remote_branches = subprocess.run(
+                    [
+                        "git",
+                        "branch",
+                        "--remotes",
+                        "--points-at",
+                        "HEAD",
+                        "--format=%(refname:short)",
+                    ],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                branch = next(
+                    (name for name in remote_branches if not name.endswith("/HEAD")),
+                    "detached HEAD",
+                )
+            return branch, commit
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    return "unavailable", "unavailable"
 
 
 def load_plotly() -> None:
@@ -954,6 +1006,8 @@ def wrapped_angle_difference_deg(first: np.ndarray, second: np.ndarray) -> np.nd
 
 def summary_html(
     bag_path: Path,
+    git_branch: str,
+    git_commit: str,
     imu: StateSeries,
     lidar: StateSeries,
     gps: GpsSeries,
@@ -989,6 +1043,8 @@ def summary_html(
 
     rows = [
         ("Bag", str(bag_path)),
+        ("Git branch", git_branch),
+        ("Git commit", git_commit),
         ("IMU samples", str(len(imu))),
         ("LiDAR samples", str(len(lidar))),
         ("Mimosa output samples", str(len(output))),
@@ -1154,6 +1210,7 @@ def write_report(
     gps_alignment: str,
     plotlyjs: str,
 ) -> None:
+    git_branch, git_commit = git_revision()
     start_time = min(
         imu.time[0], lidar.time[0], gps.time[0], mimosa_output.time[0], awsim.time[0]
     )
@@ -1317,6 +1374,8 @@ def write_report(
 
     summary = summary_html(
         bag_path,
+        git_branch,
+        git_commit,
         imu,
         lidar,
         gps,
