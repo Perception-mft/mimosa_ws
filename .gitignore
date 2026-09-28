@@ -7,6 +7,7 @@
 /.venv/
 
 # ROS 2 bag recordings
+/rosbags/
 /rosbag2_*/
 *.db3
 *.mcap
