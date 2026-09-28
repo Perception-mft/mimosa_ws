@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import shutil
 import sqlite3
 import struct
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ DEFAULT_LIDAR_TOPIC = "/debug/lidar/state"
 DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
 DEFAULT_AWSIM_TOPIC = "/control/state/pose"
+M113_CONFIG_RELATIVE_PATH = Path("config/m113/params.yaml")
 
 go = None
 pio = None
@@ -1373,12 +1375,35 @@ def default_output_path(bag_path: Path) -> Path:
     return bag_path.with_name(f"{bag_path.stem}_factor_graph_report.html")
 
 
+def find_m113_config() -> Path:
+    script_path = Path(__file__).resolve()
+    candidates = (
+        script_path.parents[1] / M113_CONFIG_RELATIVE_PATH,
+        script_path.parents[2] / "share/mimosa" / M113_CONFIG_RELATIVE_PATH,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Could not find the M113 configuration; searched: {searched}")
+
+
+def copy_m113_config(output: Path, config: Path) -> Path:
+    destination = output.parent / "m113.yaml"
+    shutil.copy2(config, destination)
+    return destination
+
+
 def main() -> int:
     args = parse_args()
     if args.max_time_difference < 0.0:
         raise SystemExit("--max-time-difference must be non-negative")
     if args.gps_max_time_difference < 0.0:
         raise SystemExit("--gps-max-time-difference must be non-negative")
+    try:
+        m113_config = find_m113_config()
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
     load_plotly()
 
     try:
@@ -1422,7 +1447,9 @@ def main() -> int:
         args.gps_alignment,
         args.plotlyjs,
     )
+    copied_config = copy_m113_config(output, m113_config)
     print(f"Report written to: {output.resolve()}")
+    print(f"M113 configuration copied to: {copied_config.resolve()}")
     return 0
 
 

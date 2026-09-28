@@ -23,6 +23,7 @@ struct SensorManagerBaseConfig
   float ts_offset = 0.0;
   bool enabled = true;
   bool use_to_init = true;
+  bool reliable_qos = false;
   int initial_skip = 0;
 };
 
@@ -51,6 +52,7 @@ inline void declare_sensor_manager_config_base(
       field(base_config.log_level, "log_level", "trace|debug|info|warn|error|critical");
       field(base_config.enabled, "enabled", "bool");
       field(base_config.use_to_init, "use_to_init", "bool");
+      field(base_config.reliable_qos, "reliable_qos", "bool");
       field(base_config.initial_skip, "initial_skip", "number of messages to drop at the start");
       field(base_config.ts_offset, "ts_offset", "s");
     }
@@ -126,8 +128,12 @@ protected:
     if (isEnabled()) {
       rclcpp::SubscriptionOptions options;
       options.callback_group = callback_group_;
+      auto qos = rclcpp::SensorDataQoS();
+      if (config_.base.reliable_qos) {
+        qos.reliable();
+      }
       sub_ = node.create_subscription<MsgT>(
-        manager_type_ + "/manager/" + manager_type_ + "_in", rclcpp::SensorDataQoS(),
+        manager_type_ + "/manager/" + manager_type_ + "_in", qos,
         [this](const typename MsgT::ConstSharedPtr msg) { callback(msg); }, options);
     }
   }
