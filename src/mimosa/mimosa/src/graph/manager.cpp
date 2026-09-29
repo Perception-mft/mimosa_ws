@@ -701,7 +701,7 @@ void Manager::publishResults()
     tf2_broadcaster_, state_.navState().pose(), config_.map_frame, config_.body_frame, state_.ts());
 
   // Broadcast the nav to map transform
-  const V3D n_g_direction = -V3D::UnitZ();
+  const V3D n_g_direction = gravityDirection(config_.navigation_frame_convention);
   V3D w_g_direction = state_.gravity().unitVector();
   // n_g = T_N_W * w_g
   gtsam::Pose3 T_N_W = gtsam::Pose3(
@@ -828,6 +828,9 @@ void declare_config(ManagerConfig & config)
   field(config.logs_directory, "logs_directory", "directory_path");
   field(config.map_frame, "map_frame", "str");
   field(config.navigation_frame, "navigation_frame", "str");
+  enum_field(
+    config.navigation_frame_convention, "navigation_frame_convention",
+    std::vector<std::string>{"ENU", "NED"});
   field(config.body_frame, "body_frame", "str");
 
   {

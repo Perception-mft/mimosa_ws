@@ -7,6 +7,7 @@
 #pragma once
 
 // mimosa
+#include "mimosa/navigation_frame.hpp"
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
 #include "mimosa/utils.hpp"
@@ -55,6 +56,7 @@ struct ManagerConfig
   std::string log_level = "info";
   std::string map_frame = "mimosa_map";
   std::string body_frame = "mimosa_body";
+  NavigationFrameConvention navigation_frame_convention = NavigationFrameConvention::ENU;
   float ts_offset = 0.0;                   // s
   bool reliable_qos = false;
   float max_buffer_duration = 2.0;         // s

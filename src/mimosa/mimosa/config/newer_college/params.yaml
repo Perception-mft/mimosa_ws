@@ -1,5 +1,6 @@
 logs_directory: /tmp/mimosa/
 map_frame: mimosa_map
+navigation_frame_convention: ENU
 body_frame: mimosa_body
 
 imu:
