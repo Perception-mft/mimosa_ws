@@ -63,7 +63,9 @@ std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParam
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams() const
 {
-  return generatePreintegratorParams(V3D(0, 0, -config_.preintegration.gravity_magnitude));
+  return generatePreintegratorParams(
+    gravityDirection(config_.navigation_frame_convention) *
+    config_.preintegration.gravity_magnitude);
 }
 
 void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
@@ -211,16 +213,19 @@ bool Manager::estimateAttitude(
   // Average IMU measurements
   acc_mean /= buffer_size;
   gyro_mean /= buffer_size;
-
   // Set the gyro bias - this assumes that we are stationary
   estimated_gyro_bias = gyro_mean;
 
   if (config_.preintegration.gravity_aligned_initialization) {
-    const V3D gravity_W = V3D(0.0, 0.0, config_.preintegration.gravity_magnitude);
+    const V3D gravity_W =
+      gravityDirection(config_.navigation_frame_convention) *
+      config_.preintegration.gravity_magnitude;
+    const V3D specific_force_W = -gravity_W;
 
     // Assuming bias is small (magnitude is less than 1m/s^2) the max angle between
     // the true gravity in the body frame and the acc_mean is 0.0922 rad or 5.28 degrees
-    gtsam::Rot3 R_I_W = gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(gravity_W, acc_mean));
+    gtsam::Rot3 R_I_W =
+      gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(specific_force_W, acc_mean));
     R_W_B = R_I_W.inverse();
 
     // This orientation is correct up to 5.28 degrees assuming magnitude(bias) < 1m/s^2
@@ -559,6 +564,9 @@ void declare_config(ManagerConfig & config)
   field(config.logs_directory, "logs_directory", "directory_path");
   field(config.map_frame, "map_frame", "str");
   field(config.body_frame, "body_frame", "str");
+  enum_field(
+    config.navigation_frame_convention, "navigation_frame_convention",
+    std::vector<std::string>{"ENU", "NED"});
 
   {
     NameSpace ns("imu");
