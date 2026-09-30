@@ -151,7 +151,7 @@ void Manager::callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
     convert(optimized_bias.gyroscope(), factor_graph_state.gyroscope_bias);
     convert(
       opt_values.at<gtsam::Unit3>(G(0)).unitVector() *
-        imu_manager_->config().preintegration.gravity_magnitude,
+        imu_manager_->config().preintegration.gravity.norm(),
       factor_graph_state.gravity);
     pub_factor_graph_state_->publish(factor_graph_state);
 

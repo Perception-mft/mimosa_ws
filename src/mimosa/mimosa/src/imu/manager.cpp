@@ -37,6 +37,12 @@ Manager::Manager(rclcpp::Node & pnh)
   sub_ = pnh.create_subscription<sensor_msgs::msg::Imu>(
     "imu/manager/imu_in", qos,
     [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { callback(msg); }, options);
+
+  if (config_.initial_yaw == InitialYawSource::SIMULATION) {
+    initial_yaw_sub_ = pnh.create_subscription<sensor_msgs::msg::Imu>(
+      "/sensing/imu/imu_raw", qos,
+      [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { initialYawCallback(msg); }, options);
+  }
 }
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams(
@@ -63,9 +69,7 @@ std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParam
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams() const
 {
-  return generatePreintegratorParams(
-    gravityDirection(config_.navigation_frame_convention) *
-    config_.preintegration.gravity_magnitude);
+  return generatePreintegratorParams(config_.preintegration.gravity);
 }
 
 void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
@@ -183,11 +187,29 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
   }
 }
 
+void Manager::initialYawCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
+{
+  const auto & q_msg = msg->orientation;
+  const Eigen::Quaterniond q(q_msg.w, q_msg.x, q_msg.y, q_msg.z);
+  if (
+    msg->orientation_covariance[0] == -1.0 || !q.coeffs().allFinite() ||
+    q.squaredNorm() <= 1.0e-12) {
+    logger_->warn("Ignoring invalid orientation from /sensing/imu/imu_raw");
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  if (!orientation_yaw_) {
+    orientation_yaw_ = gtsam::Rot3(q.normalized()).ypr()(0);
+  }
+}
+
 bool Manager::estimateAttitude(
   gtsam::Rot3 & R_W_B, V3D & estimated_acc_bias, V3D & estimated_gyro_bias)
 {
   size_t buffer_size = 0;
   V3D acc_mean(0.0, 0.0, 0.0), gyro_mean(0.0, 0.0, 0.0);
+  std::optional<double> initial_yaw;
   {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     if (buffer_.empty()) {
@@ -208,6 +230,16 @@ bool Manager::estimateAttitude(
       gyro_mean += itr.second.tail<3>();
     }
     buffer_size = buffer_.size();
+    initial_yaw = orientation_yaw_;
+  }
+
+  if (config_.initial_yaw == InitialYawSource::CONFIGURATION) {
+    initial_yaw = deg2rad(config_.initial_yaw_deg);
+  } else if (!initial_yaw) {
+    logger_->warn(
+      "Cannot initialize yaw: no valid orientation has been received on "
+      "/sensing/imu/imu_raw");
+    return false;
   }
 
   // Average IMU measurements
@@ -217,9 +249,7 @@ bool Manager::estimateAttitude(
   estimated_gyro_bias = gyro_mean;
 
   if (config_.preintegration.gravity_aligned_initialization) {
-    const V3D gravity_W =
-      gravityDirection(config_.navigation_frame_convention) *
-      config_.preintegration.gravity_magnitude;
+    const V3D & gravity_W = config_.preintegration.gravity;
     const V3D specific_force_W = -gravity_W;
 
     // Assuming bias is small (magnitude is less than 1m/s^2) the max angle between
@@ -228,22 +258,31 @@ bool Manager::estimateAttitude(
       gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(specific_force_W, acc_mean));
     R_W_B = R_I_W.inverse();
 
+    // Accelerometer measurements constrain roll and pitch but not heading. When requested, use
+    // the heading reported in the IMU message while retaining the gravity-derived tilt.
+    if (initial_yaw) {
+      const V3D gravity_aligned_ypr = R_W_B.ypr();
+      R_W_B = gtsam::Rot3::Ypr(
+        *initial_yaw, gravity_aligned_ypr(1), gravity_aligned_ypr(2));
+    }
+
     // This orientation is correct up to 5.28 degrees assuming magnitude(bias) < 1m/s^2
 
-    // Assuming this orientation, the gravity vector is simply the acc_mean rescaled to the gravity magnitude
+    // Assuming this orientation, rescale the measured direction to the configured gravity norm.
     const V3D estimated_gravity_vector =
-      acc_mean.normalized() * config_.preintegration.gravity_magnitude;
+      acc_mean.normalized() * config_.preintegration.gravity.norm();
 
     // This is then used to estimate the accelerometer bias
     estimated_acc_bias = acc_mean - estimated_gravity_vector;
 
     preintegrator_params_ = generatePreintegratorParams();
   } else {
-    // Initial orientation is identity
-    R_W_B = gtsam::Rot3::Identity();
-    // Gravity is the direction that allows this to be identity
-    V3D gravity = -acc_mean.normalized() * config_.preintegration.gravity_magnitude;
-    estimated_acc_bias = acc_mean + gravity;
+    // Without gravity alignment, initialize only the requested heading.
+    R_W_B = initial_yaw ? gtsam::Rot3::Yaw(*initial_yaw) : gtsam::Rot3::Identity();
+    // Choose gravity so the measured specific force is consistent with this orientation.
+    V3D gravity =
+      R_W_B * (-acc_mean.normalized() * config_.preintegration.gravity.norm());
+    estimated_acc_bias = acc_mean + R_W_B.inverse() * gravity;
     preintegrator_params_ = generatePreintegratorParams(gravity);
   }
   preintegrator_ = std::make_unique<gtsam::PreintegratedImuMeasurements>(preintegrator_params_);
@@ -481,7 +520,7 @@ void Manager::addImuFactorAndGetNavState(
   convert(state_0.imuBias().accelerometer(), factor_graph_state.accelerometer_bias);
   convert(state_0.imuBias().gyroscope(), factor_graph_state.gyroscope_bias);
   convert(
-    state_0.gravity().unitVector() * config_.preintegration.gravity_magnitude,
+    state_0.gravity().unitVector() * config_.preintegration.gravity.norm(),
     factor_graph_state.gravity);
   pub_factor_graph_state_->publish(factor_graph_state);
 
@@ -545,7 +584,7 @@ void declare_config(PreintegrationConfig & config)
   field(config.integration_sigma, "integration_sigma", "-");
   field(config.use_2nd_order_coriolis, "use_2nd_order_coriolis", "bool");
   field(config.use_estimated_gravity, "use_estimated_gravity", "bool");
-  field(config.gravity_magnitude, "gravity_magnitude", "m/s^2");
+  field(config.gravity, "gravity", "m/s^2");
   field(config.gravity_aligned_initialization, "gravity_aligned_initialization", "bool");
 
   check(config.acc_noise_density, GT, 0.0, "acc_noise_density");
@@ -553,7 +592,8 @@ void declare_config(PreintegrationConfig & config)
   check(config.gyro_noise_density, GT, 0.0, "gyro_noise_density");
   check(config.gyro_bias_random_walk, GT, 0.0, "gyro_bias_random_walk");
   check(config.integration_sigma, GE, 0.0, "integration_sigma");
-  check(config.gravity_magnitude, GT, 0.0, "gravity_magnitude");
+  checkCondition(config.gravity.allFinite(), "gravity must contain only finite values");
+  checkCondition(config.gravity.norm() > 0.0, "gravity must be non-zero");
 }
 
 void declare_config(ManagerConfig & config)
@@ -564,10 +604,6 @@ void declare_config(ManagerConfig & config)
   field(config.logs_directory, "logs_directory", "directory_path");
   field(config.map_frame, "map_frame", "str");
   field(config.body_frame, "body_frame", "str");
-  enum_field(
-    config.navigation_frame_convention, "navigation_frame_convention",
-    std::vector<std::string>{"ENU", "NED"});
-
   {
     NameSpace ns("imu");
     {
@@ -581,6 +617,10 @@ void declare_config(ManagerConfig & config)
       field(config.extrapolation_max_ts_diff, "extrapolation_max_ts_diff", "s");
       field(config.acc_scale_factor, "acc_scale_factor");
       field(config.max_acceleration_magnitude, "max_acceleration_magnitude", "m/s^2");
+      enum_field(
+        config.initial_yaw, "initial_yaw",
+        std::vector<std::string>{"simulation", "configuration"});
+      field(config.initial_yaw_deg, "initial_yaw_deg", "deg");
     }
     field(config.preintegration, "preintegration");
   }
@@ -591,6 +631,8 @@ void declare_config(ManagerConfig & config)
   check(config.acc_scale_factor, GE, 1.0, "acc_scale_factor");
   check(config.acc_scale_factor, LT, 10.0, "acc_scale_factor");
   check(config.max_acceleration_magnitude, GE, 0.0, "max_acceleration_magnitude");
+  check(config.initial_yaw_deg, GE, -180.0, "initial_yaw_deg");
+  check(config.initial_yaw_deg, LE, 180.0, "initial_yaw_deg");
 }
 
 }  // namespace imu
