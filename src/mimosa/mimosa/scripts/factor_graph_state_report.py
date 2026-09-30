@@ -261,7 +261,7 @@ def parse_args() -> argparse.Namespace:
         "--gps-alignment",
         choices=("se3", "translation", "none"),
         default="se3",
-        help="Alignment applied to the common Mimosa map frame before GPS comparison",
+        help="Position alignment applied to the common Mimosa map frame before GPS comparison",
     )
     parser.add_argument(
         "--plotlyjs",
@@ -667,33 +667,6 @@ def transform_positions(
     return positions @ rotation.T + translation
 
 
-def quaternion_to_rotation_matrix(quaternion: Sequence[float]) -> np.ndarray:
-    x, y, z, w = quaternion
-    norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm == 0.0:
-        raise ValueError("Cannot convert a zero-length quaternion")
-    x, y, z, w = x / norm, y / norm, z / norm, w / norm
-    return np.asarray(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ]
-    )
-
-
-def aligned_rpy_deg(quaternions: np.ndarray, frame_rotation: np.ndarray) -> np.ndarray:
-    """Express orientations in a frame reached by left-multiplying frame_rotation."""
-    rpy = []
-    for quaternion in quaternions:
-        matrix = frame_rotation @ quaternion_to_rotation_matrix(quaternion)
-        roll = math.atan2(matrix[2, 1], matrix[2, 2])
-        pitch = math.asin(float(np.clip(-matrix[2, 0], -1.0, 1.0)))
-        yaw = math.atan2(matrix[1, 0], matrix[0, 0])
-        rpy.append([roll, pitch, yaw])
-    return np.rad2deg(np.unwrap(np.asarray(rpy), axis=0))
-
-
 def zero_at_first_position(positions: np.ndarray) -> np.ndarray:
     """Express a position series relative to its first sample."""
     return positions - positions[0]
@@ -1062,7 +1035,7 @@ def summary_html(
             "Maximum absolute LiDAR/IMU orientation difference",
             metric(np.abs(orientation_delta), np.max) + " deg",
         ),
-        ("GPS alignment", gps_alignment),
+        ("GPS position alignment", gps_alignment),
         ("IMU/GPS matched samples", str(len(imu_gps_error))),
         ("LiDAR/GPS matched samples", str(len(lidar_gps_error))),
         (
@@ -1253,15 +1226,11 @@ def write_report(
         awsim.position, awsim_rotation, awsim_translation
     )
 
-    imu_rpy_aligned = aligned_rpy_deg(imu.quaternion, rotation)
-    lidar_rpy_aligned = aligned_rpy_deg(lidar.quaternion, rotation)
-    output_rpy_aligned = aligned_rpy_deg(mimosa_output.quaternion, rotation)
-    awsim_rpy_aligned = aligned_rpy_deg(awsim.quaternion, awsim_rotation)
     orientation_delta = wrapped_angle_difference_deg(
-        lidar_rpy_aligned[lidar_matches], imu_rpy_aligned[imu_matches]
+        lidar.rpy_deg[lidar_matches], imu.rpy_deg[imu_matches]
     )
     output_orientation_error = wrapped_angle_difference_deg(
-        output_rpy_aligned[output_matches], imu_rpy_aligned[imu_output_matches]
+        mimosa_output.rpy_deg[output_matches], imu.rpy_deg[imu_output_matches]
     )
 
     imu_position_aligned = zero_at_first_position(imu_position_aligned)
@@ -1296,7 +1265,7 @@ def write_report(
         - output_position_aligned[output_gt_matches]
     )
     output_gt_orientation_error = wrapped_angle_difference_deg(
-        awsim_rpy_aligned[gt_output_matches], output_rpy_aligned[output_gt_matches]
+        awsim.rpy_deg[gt_output_matches], mimosa_output.rpy_deg[output_gt_matches]
     )
 
     imu_error_time = imu.time[imu_gps_matches] - start_time
@@ -1334,13 +1303,13 @@ def write_report(
             orientation_component_figure(
                 component,
                 imu_time,
-                imu_rpy_aligned,
+                imu.rpy_deg,
                 lidar_time,
-                lidar_rpy_aligned,
+                lidar.rpy_deg,
                 output_time,
-                output_rpy_aligned,
+                mimosa_output.rpy_deg,
                 awsim_time,
-                awsim_rpy_aligned,
+                awsim.rpy_deg,
                 matched_time,
                 orientation_delta,
                 output_orientation_error_time,
@@ -1410,8 +1379,9 @@ def write_report(
 <body>
   <h1>Mimosa IMU/LiDAR/output/GPS/AWSIM comparison</h1>
   <p class="note">The AWSIM PoseStamped stream is already expressed in ROS coordinates with Z-up.
-  Mimosa and AWSIM frames are aligned independently to GPS using {gps_alignment.upper()}, and the
-  same rotations are applied to their orientations. Mimosa output is paired to the nearest AWSIM
+  Mimosa and AWSIM positions are aligned independently to GPS using {gps_alignment.upper()}.
+  Orientation traces are raw roll, pitch, and yaw converted from each message quaternion; GPS
+  alignment is not applied to orientations. Mimosa output is paired to the nearest AWSIM
   ground-truth sample within {max_time_difference:.6g} s for position and orientation errors. GPS
   is converted from WGS84 to local ENU and matched within {gps_max_time_difference:.6g} s. Each
   position trace is relative to its own first sample, so every trace begins at (0, 0, 0). Errors

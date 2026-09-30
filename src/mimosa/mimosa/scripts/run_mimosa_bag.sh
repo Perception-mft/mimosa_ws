@@ -118,6 +118,7 @@ INPUT_BAG=${POSITIONAL[0]}
 OUTPUT_BAG=${POSITIONAL[1]}
 
 command -v ros2 >/dev/null 2>&1 || die "ros2 is not available; source ROS 2 and this workspace first"
+command -v setsid >/dev/null 2>&1 || die "setsid is not available; it is required to clean up ROS process groups"
 [[ -e "$INPUT_BAG" ]] || die "input bag does not exist: $INPUT_BAG"
 [[ ! -e "$OUTPUT_BAG" ]] || die "output bag already exists: $OUTPUT_BAG"
 [[ -z "$CONFIG_OVERRIDE" || -f "$CONFIG_OVERRIDE" ]] || die "config override does not exist: $CONFIG_OVERRIDE"
@@ -134,23 +135,39 @@ RECORD_PID=
 PLAY_PID=
 CLEANING_UP=false
 
-stop_process() {
-  local pid=$1
-  local label=$2
+process_group_is_running() {
+  kill -0 -- "-$1" 2>/dev/null
+}
+
+wait_for_process_group() {
+  local pgid=$1
+  local max_attempts=$2
   local attempts=0
 
-  [[ -n "$pid" ]] || return 0
-  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
-
-  echo "Stopping $label..."
-  kill -INT "$pid" 2>/dev/null || true
-  while kill -0 "$pid" 2>/dev/null && ((attempts < 100)); do
+  while process_group_is_running "$pgid" && ((attempts < max_attempts)); do
     sleep 0.1
     ((attempts += 1))
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  ! process_group_is_running "$pgid"
+}
+
+stop_process_group() {
+  local pid=$1
+  local label=$2
+
+  [[ -n "$pid" ]] || return 0
+  process_group_is_running "$pid" || { wait "$pid" 2>/dev/null || true; return 0; }
+
+  echo "Stopping $label..."
+  kill -INT -- "-$pid" 2>/dev/null || true
+  if ! wait_for_process_group "$pid" 100; then
     echo "$label did not stop after SIGINT; sending SIGTERM." >&2
-    kill -TERM "$pid" 2>/dev/null || true
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    if ! wait_for_process_group "$pid" 50; then
+      echo "$label did not stop after SIGTERM; sending SIGKILL." >&2
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      wait_for_process_group "$pid" 20 || true
+    fi
   fi
   wait "$pid" 2>/dev/null || true
 }
@@ -160,9 +177,9 @@ cleanup() {
   [[ "$CLEANING_UP" == false ]] || return
   CLEANING_UP=true
   trap - EXIT INT TERM
-  stop_process "$PLAY_PID" "bag playback"
-  stop_process "$RECORD_PID" "bag recorder"
-  stop_process "$LAUNCH_PID" "MIMOSA launch"
+  stop_process_group "$PLAY_PID" "bag playback"
+  stop_process_group "$RECORD_PID" "bag recorder"
+  stop_process_group "$LAUNCH_PID" "MIMOSA launch"
   exit "$status"
 }
 trap cleanup EXIT
@@ -182,7 +199,7 @@ fi
 launch_cmd+=("${EXTRA_LAUNCH_ARGS[@]}")
 
 echo "Starting MIMOSA (profile=$PROFILE, viz=$VIZ)..."
-"${launch_cmd[@]}" &
+setsid "${launch_cmd[@]}" &
 LAUNCH_PID=$!
 sleep "$STARTUP_DELAY"
 kill -0 "$LAUNCH_PID" 2>/dev/null || { wait "$LAUNCH_PID" || true; die "MIMOSA launch exited during startup"; }
@@ -190,7 +207,7 @@ kill -0 "$LAUNCH_PID" 2>/dev/null || { wait "$LAUNCH_PID" || true; die "MIMOSA l
 record_cmd=(ros2 bag record --all-topics --output "$OUTPUT_BAG" --disable-keyboard-controls)
 record_cmd+=("${EXTRA_RECORD_ARGS[@]}")
 echo "Recording all topics to: $OUTPUT_BAG"
-"${record_cmd[@]}" &
+setsid "${record_cmd[@]}" &
 RECORD_PID=$!
 sleep "$RECORD_DELAY"
 kill -0 "$RECORD_PID" 2>/dev/null || { wait "$RECORD_PID" || true; die "bag recorder exited during startup"; }
@@ -204,7 +221,7 @@ play_cmd=(
 )
 play_cmd+=("${EXTRA_PLAY_ARGS[@]}")
 echo "Playing all topics from: $INPUT_BAG"
-"${play_cmd[@]}" &
+setsid "${play_cmd[@]}" &
 PLAY_PID=$!
 set +e
 wait "$PLAY_PID"
@@ -212,9 +229,9 @@ play_status=$?
 set -e
 PLAY_PID=
 
-stop_process "$RECORD_PID" "bag recorder"
+stop_process_group "$RECORD_PID" "bag recorder"
 RECORD_PID=
-stop_process "$LAUNCH_PID" "MIMOSA launch"
+stop_process_group "$LAUNCH_PID" "MIMOSA launch"
 LAUNCH_PID=
 
 ((play_status == 0)) || die "bag playback failed with exit status $play_status"
