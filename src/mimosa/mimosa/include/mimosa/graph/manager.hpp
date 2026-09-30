@@ -57,7 +57,6 @@ struct ManagerConfig
 {
   std::string map_frame = "map";
   std::string navigation_frame = "navigation";
-  NavigationFrameConvention navigation_frame_convention = NavigationFrameConvention::ENU;
   std::string body_frame = "body";
   std::string logs_directory = "/tmp/";
   std::string log_level = "info";

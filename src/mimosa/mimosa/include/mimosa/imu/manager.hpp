@@ -7,7 +7,6 @@
 #pragma once
 
 // mimosa
-#include "mimosa/navigation_frame.hpp"
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
 #include "mimosa/utils.hpp"
@@ -27,6 +26,7 @@
 
 // C++
 #include <deque>
+#include <optional>
 
 namespace mimosa
 {
@@ -35,6 +35,12 @@ typedef std::deque<ImuMeasurement> ImuBuffer;
 
 namespace imu
 {
+enum class InitialYawSource
+{
+  SIMULATION,
+  CONFIGURATION,
+};
+
 struct PreintegrationConfig
 {
   float acc_noise_density = 0.0013886655606357616;
@@ -44,7 +50,7 @@ struct PreintegrationConfig
   float integration_sigma = 1.0e-4;
   bool use_2nd_order_coriolis = false;
   bool use_estimated_gravity = false;
-  float gravity_magnitude = 9.81;
+  V3D gravity = V3D(0.0, 0.0, -9.81);
   bool gravity_aligned_initialization = true;
 };
 
@@ -56,7 +62,6 @@ struct ManagerConfig
   std::string log_level = "info";
   std::string map_frame = "mimosa_map";
   std::string body_frame = "mimosa_body";
-  NavigationFrameConvention navigation_frame_convention = NavigationFrameConvention::ENU;
   float ts_offset = 0.0;                   // s
   bool reliable_qos = false;
   float max_buffer_duration = 2.0;         // s
@@ -65,6 +70,8 @@ struct ManagerConfig
   float extrapolation_max_ts_diff = 0.01;  // s
   float acc_scale_factor = 1.0;            // used only when IMU measurements are in units of g
   float max_acceleration_magnitude = 0.0;  // m/s^2; zero disables the limit
+  InitialYawSource initial_yaw = InitialYawSource::CONFIGURATION;
+  float initial_yaw_deg = 0.0;
 
   PreintegrationConfig preintegration;
 };
@@ -79,11 +86,13 @@ private:
 
   // Inputs
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr initial_yaw_sub_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
 
   // Member variables
   ImuBuffer buffer_;
   std::mutex buffer_mutex_;
+  std::optional<double> orientation_yaw_;
   bool has_recieved_first_message_ = false;
   std::shared_ptr<gtsam::PreintegrationParams> preintegrator_params_;
   std::unique_ptr<gtsam::PreintegratedImuMeasurements> preintegrator_;
@@ -113,6 +122,7 @@ private:
     const gtsam::Key key_0, const gtsam::Key key_1, gtsam::NonlinearFactorGraph & graph);
   V6D interpolateMeasurement(
     const double ts1, const V6D & meas1, const double ts2, const V6D & meas2, const double ts);
+  void initialYawCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg);
 
 public:
   using Ptr = std::shared_ptr<Manager>;
