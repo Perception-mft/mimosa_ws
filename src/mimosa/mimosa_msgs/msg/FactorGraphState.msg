@@ -12,3 +12,7 @@ geometry_msgs/Vector3 velocity
 geometry_msgs/Vector3 accelerometer_bias
 geometry_msgs/Vector3 gyroscope_bias
 geometry_msgs/Vector3 gravity
+
+# Motion contributed by this source since its previous graph pose. The transform is
+# expressed in the previous body frame and is intended to be composed over time.
+geometry_msgs/Pose pose_delta

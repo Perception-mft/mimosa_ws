@@ -87,9 +87,10 @@ Mimosa publishes the sensor state supplied to the factor graph before GTSAM opti
 - `/debug/lidar/state`: the state at which the LiDAR factors were built and linearized.
 
 Both topics use `mimosa_msgs/msg/FactorGraphState`. The message contains the shared graph-state
-index, pose, velocity, accelerometer bias, gyroscope bias, and full gravity vector in m/s². These
-topics intentionally contain pre-optimization values; use `/mimosa_node/graph/odometry` for the
-optimized state.
+index, pose, velocity, accelerometer bias, gyroscope bias, full gravity vector in m/s², and the
+source-calculated `pose_delta` from the previous graph pose. The report composes these deltas to
+show cumulative IMU and LiDAR motion without deriving increments from later state samples. Use
+`/mimosa_node/graph/odometry` for the optimized output state.
 
 Generate an interactive comparison report from a ROS 2 bag containing these topics:
 
@@ -108,6 +109,10 @@ IMU, LiDAR, optimized Mimosa output (`/mimosa_node/graph/odometry`), and GPS tra
 corresponding GPS errors. It also contains one figure for roll, pitch, and yaw with the IMU, LiDAR,
 and optimized output traces plus their differences against IMU, and an aligned 3D trajectory.
 `NavSatFix` has no orientation, so GPS cannot be included in the orientation figures.
+The existing position and orientation figures also include traces built by cumulatively composing
+the `pose_delta` values published by the IMU and LiDAR paths, including their difference in each
+error subplot and each cumsum's error against AWSIM ground truth. Each cumulative orientation is
+anchored to that source's first recorded orientation.
 
 By default the script estimates an SE(3) transform from the Mimosa map frame to the GPS ENU frame
 without changing trajectory scale, and applies that same transform to the IMU, LiDAR, and optimized

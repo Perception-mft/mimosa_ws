@@ -153,6 +153,9 @@ void Manager::callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
       opt_values.at<gtsam::Unit3>(G(0)).unitVector() *
         imu_manager_->config().preintegration.gravity.norm(),
       factor_graph_state.gravity);
+    convert(
+      prev_state_.navState().pose().between(opt_values.at<gtsam::Pose3>(X(new_key_))),
+      factor_graph_state.pose_delta);
     pub_factor_graph_state_->publish(factor_graph_state);
 
     // const gtsam::NonlinearFactorGraph factors = graph_manager_->getFactors();

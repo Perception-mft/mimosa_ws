@@ -110,6 +110,8 @@ class StateSeries:
     accelerometer_bias: np.ndarray
     gyroscope_bias: np.ndarray
     gravity: np.ndarray
+    delta_position: np.ndarray
+    delta_quaternion: np.ndarray
 
     def __len__(self) -> int:
         return len(self.time)
@@ -125,6 +127,8 @@ class DecodedState:
     accelerometer_bias: np.ndarray
     gyroscope_bias: np.ndarray
     gravity: np.ndarray
+    delta_position: np.ndarray
+    delta_quaternion: np.ndarray
 
 
 @dataclass
@@ -294,6 +298,15 @@ def decode_state(payload: bytes, bag_timestamp_ns: int) -> DecodedState:
     reader.string()  # header.frame_id is not needed for plotting.
     state_index = reader.uint64()
     values = np.asarray([reader.float64() for _ in range(19)])
+    # pose_delta was appended to FactorGraphState so reports can still read bags
+    # recorded with the original message layout.
+    if len(payload) - reader.offset >= 7 * 8:
+        delta_values = np.asarray([reader.float64() for _ in range(7)])
+        delta_position = delta_values[0:3]
+        delta_quaternion = delta_values[3:7]
+    else:
+        delta_position = np.zeros(3)
+        delta_quaternion = np.asarray([0.0, 0.0, 0.0, 1.0])
     timestamp = (
         bag_timestamp_ns * 1e-9
         if seconds == 0 and nanoseconds == 0
@@ -308,6 +321,8 @@ def decode_state(payload: bytes, bag_timestamp_ns: int) -> DecodedState:
         accelerometer_bias=values[10:13],
         gyroscope_bias=values[13:16],
         gravity=values[16:19],
+        delta_position=delta_position,
+        delta_quaternion=delta_quaternion,
     )
 
 
@@ -380,6 +395,8 @@ def empty_series() -> StateSeries:
         accelerometer_bias=np.empty((0, 3)),
         gyroscope_bias=np.empty((0, 3)),
         gravity=np.empty((0, 3)),
+        delta_position=np.empty((0, 3)),
+        delta_quaternion=np.empty((0, 4)),
     )
 
 
@@ -403,6 +420,8 @@ def records_to_series(records: List[DecodedState]) -> StateSeries:
         accelerometer_bias=np.asarray([item.accelerometer_bias for item in records]),
         gyroscope_bias=np.asarray([item.gyroscope_bias for item in records]),
         gravity=np.asarray([item.gravity for item in records]),
+        delta_position=np.asarray([item.delta_position for item in records]),
+        delta_quaternion=np.asarray([item.delta_quaternion for item in records]),
     )
 
 
@@ -676,8 +695,10 @@ def gps_component_figure(
     component: int,
     imu_time: np.ndarray,
     imu_position: np.ndarray,
+    imu_cumulative_position: np.ndarray,
     lidar_time: np.ndarray,
     lidar_position: np.ndarray,
+    lidar_cumulative_position: np.ndarray,
     output_time: np.ndarray,
     output_position: np.ndarray,
     gps_time: np.ndarray,
@@ -692,6 +713,12 @@ def gps_component_figure(
     output_error: np.ndarray,
     output_gt_error_time: np.ndarray,
     output_gt_error: np.ndarray,
+    cumulative_error_time: np.ndarray,
+    cumulative_error: np.ndarray,
+    imu_cumulative_gt_error_time: np.ndarray,
+    imu_cumulative_gt_error: np.ndarray,
+    lidar_cumulative_gt_error_time: np.ndarray,
+    lidar_cumulative_gt_error: np.ndarray,
 ) -> go.Figure:
     axis = ("x", "y", "z")[component]
     figure = make_subplots(
@@ -720,6 +747,30 @@ def gps_component_figure(
             name="LiDAR",
             mode="lines+markers",
             marker={"size": 4},
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=imu_time,
+            y=imu_cumulative_position[:, component],
+            name="IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=lidar_time,
+            y=lidar_cumulative_position[:, component],
+            name="LiDAR pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
             visible="legendonly",
         ),
         row=1,
@@ -804,6 +855,42 @@ def gps_component_figure(
         row=2,
         col=1,
     )
+    figure.add_trace(
+        go.Scatter(
+            x=cumulative_error_time,
+            y=cumulative_error[:, component],
+            name="LiDAR - IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=imu_cumulative_gt_error_time,
+            y=imu_cumulative_gt_error[:, component],
+            name="AWSIM GT - IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dot"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=lidar_cumulative_gt_error_time,
+            y=lidar_cumulative_gt_error[:, component],
+            name="AWSIM GT - LiDAR pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dot"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
     figure.update_yaxes(title_text=f"Relative {axis} [m]", row=1, col=1)
     figure.update_yaxes(title_text="Error [m]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
@@ -821,8 +908,10 @@ def orientation_component_figure(
     component: int,
     imu_time: np.ndarray,
     imu_orientation: np.ndarray,
+    imu_cumulative_orientation: np.ndarray,
     lidar_time: np.ndarray,
     lidar_orientation: np.ndarray,
+    lidar_cumulative_orientation: np.ndarray,
     output_time: np.ndarray,
     output_orientation: np.ndarray,
     awsim_time: np.ndarray,
@@ -833,6 +922,12 @@ def orientation_component_figure(
     output_orientation_error: np.ndarray,
     output_gt_error_time: np.ndarray,
     output_gt_orientation_error: np.ndarray,
+    cumulative_error_time: np.ndarray,
+    cumulative_orientation_error: np.ndarray,
+    imu_cumulative_gt_error_time: np.ndarray,
+    imu_cumulative_gt_orientation_error: np.ndarray,
+    lidar_cumulative_gt_error_time: np.ndarray,
+    lidar_cumulative_gt_orientation_error: np.ndarray,
 ) -> go.Figure:
     angle = ("Roll", "Pitch", "Yaw")[component]
     figure = make_subplots(
@@ -861,6 +956,30 @@ def orientation_component_figure(
             name="LiDAR",
             mode="lines+markers",
             marker={"size": 4},
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=imu_time,
+            y=imu_cumulative_orientation[:, component],
+            name="IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=lidar_time,
+            y=lidar_cumulative_orientation[:, component],
+            name="LiDAR pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
             visible="legendonly",
         ),
         row=1,
@@ -922,6 +1041,42 @@ def orientation_component_figure(
         row=2,
         col=1,
     )
+    figure.add_trace(
+        go.Scatter(
+            x=cumulative_error_time,
+            y=cumulative_orientation_error[:, component],
+            name="LiDAR - IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dash"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=imu_cumulative_gt_error_time,
+            y=imu_cumulative_gt_orientation_error[:, component],
+            name="AWSIM GT - IMU pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dot"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=lidar_cumulative_gt_error_time,
+            y=lidar_cumulative_gt_orientation_error[:, component],
+            name="AWSIM GT - LiDAR pose_delta cumsum",
+            mode="lines",
+            line={"dash": "dot"},
+            visible="legendonly",
+        ),
+        row=2,
+        col=1,
+    )
     figure.update_yaxes(title_text="Angle [deg]", row=1, col=1)
     figure.update_yaxes(title_text="Difference [deg]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
@@ -938,6 +1093,8 @@ def orientation_component_figure(
 def gps_trajectory_figure(
     imu_position: np.ndarray,
     lidar_position: np.ndarray,
+    imu_cumulative_position: np.ndarray,
+    lidar_cumulative_position: np.ndarray,
     output_position: np.ndarray,
     gps_position: np.ndarray,
     awsim_position: np.ndarray,
@@ -946,6 +1103,8 @@ def gps_trajectory_figure(
     for name, position in (
         ("IMU", imu_position),
         ("LiDAR", lidar_position),
+        ("IMU pose_delta cumsum", imu_cumulative_position),
+        ("LiDAR pose_delta cumsum", lidar_cumulative_position),
         ("Mimosa output", output_position),
         ("GPS", gps_position),
         ("AWSIM ground truth", awsim_position),
@@ -977,6 +1136,72 @@ def wrapped_angle_difference_deg(first: np.ndarray, second: np.ndarray) -> np.nd
     return (first - second + 180.0) % 360.0 - 180.0
 
 
+def quaternion_multiply(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Compose two quaternions stored in ROS x, y, z, w order."""
+    x1, y1, z1, w1 = first
+    x2, y2, z2, w2 = second
+    return np.asarray(
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ]
+    )
+
+
+def rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    vector_quaternion = np.asarray([vector[0], vector[1], vector[2], 0.0])
+    conjugate = np.asarray(
+        [-quaternion[0], -quaternion[1], -quaternion[2], quaternion[3]]
+    )
+    return quaternion_multiply(
+        quaternion_multiply(quaternion, vector_quaternion), conjugate
+    )[0:3]
+
+
+def accumulate_pose_deltas(series: StateSeries) -> Tuple[np.ndarray, np.ndarray]:
+    """Compose body-frame deltas, anchored to the first recorded orientation."""
+    positions = np.empty((len(series), 3))
+    quaternions = np.empty((len(series), 4))
+    position = np.zeros(3)
+    first_delta_quaternion = series.delta_quaternion[0]
+    first_delta_norm = np.linalg.norm(first_delta_quaternion)
+    if first_delta_norm == 0.0:
+        first_delta_quaternion = np.asarray([0.0, 0.0, 0.0, 1.0])
+    else:
+        first_delta_quaternion = first_delta_quaternion / first_delta_norm
+    first_orientation = series.quaternion[0]
+    first_orientation = first_orientation / np.linalg.norm(first_orientation)
+    first_delta_inverse = np.asarray(
+        [
+            -first_delta_quaternion[0],
+            -first_delta_quaternion[1],
+            -first_delta_quaternion[2],
+            first_delta_quaternion[3],
+        ]
+    )
+    # q_current = q_previous * q_delta. Recover q_previous so composing the
+    # first delta produces exactly the first absolute orientation in the bag.
+    quaternion = quaternion_multiply(first_orientation, first_delta_inverse)
+    for index, (delta_position, delta_quaternion) in enumerate(
+        zip(series.delta_position, series.delta_quaternion)
+    ):
+        delta_norm = np.linalg.norm(delta_quaternion)
+        if delta_norm == 0.0:
+            delta_quaternion = np.asarray([0.0, 0.0, 0.0, 1.0])
+        else:
+            delta_quaternion = delta_quaternion / delta_norm
+        position = position + rotate_vector(quaternion, delta_position)
+        quaternion = quaternion_multiply(quaternion, delta_quaternion)
+        quaternion = quaternion / np.linalg.norm(quaternion)
+        positions[index] = position
+        quaternions[index] = quaternion
+    rpy = np.asarray([quaternion_to_rpy_deg(value) for value in quaternions])
+    rpy = np.rad2deg(np.unwrap(np.deg2rad(rpy), axis=0))
+    return positions, rpy
+
+
 def summary_html(
     bag_path: Path,
     git_branch: str,
@@ -990,6 +1215,8 @@ def summary_html(
     output_matched_count: int,
     position_delta: np.ndarray,
     orientation_delta: np.ndarray,
+    cumulative_position_delta: np.ndarray,
+    cumulative_orientation_delta: np.ndarray,
     gps_alignment: str,
     imu_gps_error: np.ndarray,
     lidar_gps_error: np.ndarray,
@@ -1034,6 +1261,22 @@ def summary_html(
         (
             "Maximum absolute LiDAR/IMU orientation difference",
             metric(np.abs(orientation_delta), np.max) + " deg",
+        ),
+        (
+            "Mean cumulative-delta LiDAR/IMU position difference",
+            metric(np.linalg.norm(cumulative_position_delta, axis=1), np.mean) + " m",
+        ),
+        (
+            "Maximum cumulative-delta LiDAR/IMU position difference",
+            metric(np.linalg.norm(cumulative_position_delta, axis=1), np.max) + " m",
+        ),
+        (
+            "Mean absolute cumulative-delta LiDAR/IMU orientation difference",
+            metric(np.abs(cumulative_orientation_delta), np.mean) + " deg",
+        ),
+        (
+            "Maximum absolute cumulative-delta LiDAR/IMU orientation difference",
+            metric(np.abs(cumulative_orientation_delta), np.max) + " deg",
         ),
         ("GPS position alignment", gps_alignment),
         ("IMU/GPS matched samples", str(len(imu_gps_error))),
@@ -1229,6 +1472,25 @@ def write_report(
     orientation_delta = wrapped_angle_difference_deg(
         lidar.rpy_deg[lidar_matches], imu.rpy_deg[imu_matches]
     )
+    imu_cumulative_position, imu_cumulative_rpy = accumulate_pose_deltas(imu)
+    lidar_cumulative_position, lidar_cumulative_rpy = accumulate_pose_deltas(lidar)
+    # The existing position figures are displayed in the GPS-aligned axes. Deltas
+    # are vectors, so apply the alignment rotation without its translation.
+    imu_cumulative_position = transform_positions(
+        imu_cumulative_position, rotation, np.zeros(3)
+    )
+    lidar_cumulative_position = transform_positions(
+        lidar_cumulative_position, rotation, np.zeros(3)
+    )
+    imu_cumulative_position = zero_at_first_position(imu_cumulative_position)
+    lidar_cumulative_position = zero_at_first_position(lidar_cumulative_position)
+    cumulative_position_delta = (
+        lidar_cumulative_position[lidar_matches]
+        - imu_cumulative_position[imu_matches]
+    )
+    cumulative_orientation_delta = wrapped_angle_difference_deg(
+        lidar_cumulative_rpy[lidar_matches], imu_cumulative_rpy[imu_matches]
+    )
     output_orientation_error = wrapped_angle_difference_deg(
         mimosa_output.rpy_deg[output_matches], imu.rpy_deg[imu_output_matches]
     )
@@ -1267,11 +1529,35 @@ def write_report(
     output_gt_orientation_error = wrapped_angle_difference_deg(
         awsim.rpy_deg[gt_output_matches], mimosa_output.rpy_deg[output_gt_matches]
     )
+    imu_cumulative_gt_matches, gt_imu_cumulative_matches = nearest_matches(
+        awsim.time, imu.time, max_time_difference
+    )
+    lidar_cumulative_gt_matches, gt_lidar_cumulative_matches = nearest_matches(
+        awsim.time, lidar.time, max_time_difference
+    )
+    imu_cumulative_gt_position_error = (
+        awsim_position_aligned[gt_imu_cumulative_matches]
+        - imu_cumulative_position[imu_cumulative_gt_matches]
+    )
+    lidar_cumulative_gt_position_error = (
+        awsim_position_aligned[gt_lidar_cumulative_matches]
+        - lidar_cumulative_position[lidar_cumulative_gt_matches]
+    )
+    imu_cumulative_gt_orientation_error = wrapped_angle_difference_deg(
+        awsim.rpy_deg[gt_imu_cumulative_matches],
+        imu_cumulative_rpy[imu_cumulative_gt_matches],
+    )
+    lidar_cumulative_gt_orientation_error = wrapped_angle_difference_deg(
+        awsim.rpy_deg[gt_lidar_cumulative_matches],
+        lidar_cumulative_rpy[lidar_cumulative_gt_matches],
+    )
 
     imu_error_time = imu.time[imu_gps_matches] - start_time
     lidar_error_time = lidar.time[lidar_gps_matches] - start_time
     output_error_time = mimosa_output.time[output_gps_matches] - start_time
     output_gt_error_time = mimosa_output.time[output_gt_matches] - start_time
+    imu_cumulative_gt_error_time = imu.time[imu_cumulative_gt_matches] - start_time
+    lidar_cumulative_gt_error_time = lidar.time[lidar_cumulative_gt_matches] - start_time
     figures = []
     for component in range(3):
         figures.append(
@@ -1279,8 +1565,10 @@ def write_report(
                 component,
                 imu_time,
                 imu_position_aligned,
+                imu_cumulative_position,
                 lidar_time,
                 lidar_position_aligned,
+                lidar_cumulative_position,
                 output_time,
                 output_position_aligned,
                 gps_time,
@@ -1295,6 +1583,12 @@ def write_report(
                 gps_output_error,
                 output_gt_error_time,
                 output_gt_position_error,
+                matched_time,
+                cumulative_position_delta,
+                imu_cumulative_gt_error_time,
+                imu_cumulative_gt_position_error,
+                lidar_cumulative_gt_error_time,
+                lidar_cumulative_gt_position_error,
             )
         )
 
@@ -1304,8 +1598,10 @@ def write_report(
                 component,
                 imu_time,
                 imu.rpy_deg,
+                imu_cumulative_rpy,
                 lidar_time,
                 lidar.rpy_deg,
+                lidar_cumulative_rpy,
                 output_time,
                 mimosa_output.rpy_deg,
                 awsim_time,
@@ -1316,6 +1612,12 @@ def write_report(
                 output_orientation_error,
                 output_gt_error_time,
                 output_gt_orientation_error,
+                matched_time,
+                cumulative_orientation_delta,
+                imu_cumulative_gt_error_time,
+                imu_cumulative_gt_orientation_error,
+                lidar_cumulative_gt_error_time,
+                lidar_cumulative_gt_orientation_error,
             )
         )
 
@@ -1323,6 +1625,8 @@ def write_report(
         gps_trajectory_figure(
             imu_position_aligned,
             lidar_position_aligned,
+            imu_cumulative_position,
+            lidar_cumulative_position,
             output_position_aligned,
             gps_position,
             awsim_position_aligned,
@@ -1354,6 +1658,8 @@ def write_report(
         len(output_matches),
         position_delta,
         orientation_delta,
+        cumulative_position_delta,
+        cumulative_orientation_delta,
         gps_alignment,
         imu_gps_error,
         lidar_gps_error,
@@ -1387,7 +1693,11 @@ def write_report(
   position trace is relative to its own first sample, so every trace begins at (0, 0, 0). Errors
   therefore show relative-motion differences from the start of each source. Only Mimosa output,
   AWSIM ground truth, and their error are visible by default; the other traces can be enabled from
-  the legends. Source traces retain their original timestamps.</p>
+  the legends. Source traces retain their original timestamps. The <code>pose_delta cumsum</code>
+  traces in the existing position, orientation, error, and 3D plots compose each source's recorded
+  body-frame deltas, anchored to its first recorded orientation; they do not derive increments by
+  subtracting absolute states. Each error subplot also includes AWSIM ground truth minus the IMU
+  cumsum and AWSIM ground truth minus the LiDAR cumsum.</p>
   <h2>Summary</h2>
   {summary}
   {''.join(fragments)}

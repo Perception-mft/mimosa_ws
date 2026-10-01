@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 project(mimosa)
 
+# PCL's FindFLANN module uses FLANN_ROOT. Honor it on CMake 3.27+ and avoid
+# the CMP0144 developer warning while retaining compatibility with older CMake.
+# PCLConfig.cmake resets its policy version, so also provide the nested scope's
+# default explicitly.
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW)
+  set(CMAKE_POLICY_DEFAULT_CMP0144 NEW)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(geometry_msgs REQUIRED)
