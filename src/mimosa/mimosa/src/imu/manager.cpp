@@ -522,6 +522,7 @@ void Manager::addImuFactorAndGetNavState(
   convert(
     state_0.gravity().unitVector() * config_.preintegration.gravity.norm(),
     factor_graph_state.gravity);
+  convert(state_0.navState().pose().between(ns_1.pose()), factor_graph_state.pose_delta);
   pub_factor_graph_state_->publish(factor_graph_state);
 
   gtsam::Values values;
