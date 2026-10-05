@@ -19,18 +19,18 @@ Geometric::Geometric(rclcpp::Node & pnh)
   logger_->info("lidar::Geometric initialized with params:\n {}", config::toString(config));
 
   Be_cloud_.reset(new pcl::PointCloud<Point>);
-  kiss_icp::pipeline::KISSConfig kiss_config;
+  kiss_icp::Config kiss_config;
   kiss_config.voxel_size = config.scan_to_map.voxel_size;
   kiss_config.max_range = config.scan_to_map.max_range;
   kiss_config.min_range = config.scan_to_map.min_range;
   kiss_config.max_points_per_voxel = config.scan_to_map.max_points_per_voxel;
-  kiss_config.min_motion_th = config.scan_to_map.min_motion_threshold;
+  kiss_config.min_motion_threshold = config.scan_to_map.min_motion_threshold;
   kiss_config.initial_threshold = config.scan_to_map.initial_threshold;
   kiss_config.max_num_iterations = config.scan_to_map.max_num_iterations;
   kiss_config.convergence_criterion = config.scan_to_map.convergence_criterion;
   kiss_config.max_num_threads = config.scan_to_map.max_num_threads;
   kiss_config.deskew = config.scan_to_map.deskew;
-  kiss_icp_ = std::make_unique<kiss_icp::pipeline::KissICP>(kiss_config);
+  kiss_icp_ = std::make_unique<kiss_icp::KissICP>(kiss_config);
 
   pub_sm_cloud_ = pnh.create_publisher<sensor_msgs::msg::PointCloud2>("lidar/geometric/sm_cloud", 1);
   pub_sm_cloud_ds_ = pnh.create_publisher<sensor_msgs::msg::PointCloud2>("lidar/geometric/sm_cloud_ds", 1);
@@ -126,10 +126,10 @@ void Geometric::getFactors(
     return;
   }
 
-  // This single call is the exact standalone KISS-ICP algorithm. Internally it
+  // This single call runs Mimosa's self-contained KISS-ICP implementation. It
   // performs deskew, two-stage voxelization, adaptive-threshold registration,
   // constant-velocity prediction, map insertion, and delta/pose updates.
-  const auto [frame, source] = kiss_icp_->RegisterFrame(kiss_frame_, kiss_timestamps_);
+  const auto [frame, source] = kiss_icp_->registerFrame(kiss_frame_, kiss_timestamps_);
 
   Be_cloud_->clear();
   Be_cloud_->reserve(frame.size());
@@ -147,7 +147,7 @@ void Geometric::getFactors(
   }
   debug_msg_.n_points_in_sm_ds = source.size();
 
-  const Sophus::SE3d & kiss_pose = kiss_icp_->pose();
+  const gtsam::Pose3 & kiss_pose = kiss_icp_->pose();
   if (!kiss_pose.matrix().allFinite()) {
     logger_->error("KISS-ICP returned a non-finite pose; skipping its GTSAM factor");
     factor_.reset();
@@ -155,9 +155,7 @@ void Geometric::getFactors(
     degen_directions.setOnes();
     return;
   }
-  const gtsam::Pose3 T_K_B(
-    gtsam::Rot3(kiss_pose.rotationMatrix()), kiss_pose.translation());
-  const gtsam::Pose3 measured_pose = T_W_K_ * T_K_B;
+  const gtsam::Pose3 measured_pose = T_W_K_ * kiss_pose;
   factor_ = std::make_shared<KISSICPFactor>(key, measured_pose, config.scan_to_map);
 
   if (pub_sm_correspondances_ma_->get_subscription_count()) {
@@ -407,7 +405,7 @@ void Geometric::updateMap(const gtsam::Key key, const gtsam::Values & values)
     // connects that frame to Mimosa's graph/world frame for the GTSAM factor.
     T_W_K_ = T_W_Be;
     if (!kiss_frame_.empty()) {
-      const auto [frame, source] = kiss_icp_->RegisterFrame(kiss_frame_, kiss_timestamps_);
+      const auto [frame, source] = kiss_icp_->registerFrame(kiss_frame_, kiss_timestamps_);
       Be_cloud_->clear();
       Be_cloud_->reserve(frame.size());
       for (const V3D & p : frame) {
@@ -482,7 +480,7 @@ void Geometric::updateMap(const gtsam::Key key, const gtsam::Values & values)
     if (pub_map_->get_subscription_count()) {
       // Publish the updated map
       pcl::PointCloud<Point> W_map;
-      for (const V3D & point_K : kiss_icp_->LocalMap()) {
+      for (const V3D & point_K : kiss_icp_->localMap()) {
         const V3D point_W = T_W_K_ * point_K;
         Point point;
         point.getVector3fMap() = point_W.cast<float>();

@@ -19,6 +19,7 @@
 // mimosa
 #include "mimosa/lidar/geometric_config.hpp"
 #include "mimosa/lidar/geometric_factor.hpp"
+#include "mimosa/lidar/kiss_icp.hpp"
 #include "mimosa/lidar/utils.hpp"
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
@@ -27,8 +28,6 @@
 
 // ROS
 #include <geometry_msgs/msg/pose_array.hpp>
-
-#include <kiss_icp/pipeline/KissICP.hpp>
 
 namespace mimosa
 {
@@ -46,7 +45,7 @@ private:
   pcl::PointCloud<Point>::Ptr Be_cloud_;
   pcl::PointCloud<Point> sm_Be_cloud_ds_;
   KISSICPFactor::Ptr factor_;
-  std::unique_ptr<kiss_icp::pipeline::KissICP> kiss_icp_;
+  std::unique_ptr<kiss_icp::KissICP> kiss_icp_;
   std::vector<Eigen::Vector3d> kiss_frame_;
   std::vector<double> kiss_timestamps_;
   gtsam::Pose3 T_W_K_;
