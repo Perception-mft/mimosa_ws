@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <functional>
+
 // mimosa
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
@@ -50,7 +52,7 @@ struct PreintegrationConfig
   float integration_sigma = 1.0e-4;
   bool use_2nd_order_coriolis = false;
   bool use_estimated_gravity = false;
-  V3D gravity = V3D(0.0, 0.0, -9.81);
+  V3D gravity = V3D(0.0, 0.0, -9.81);  // m/s^2; zero disables gravity
   bool gravity_aligned_initialization = true;
 };
 
@@ -104,6 +106,7 @@ private:
   State propagation_base_state_;
   double propagated_upto_ts_ = 0;
   std::mutex propagation_mutex_;
+  std::function<void(double)> measurement_callback_;
 
   // Outputs
   rclcpp::Publisher<mimosa_msgs::msg::ImuManagerDebug>::SharedPtr pub_debug_;
@@ -134,6 +137,10 @@ public:
   }
   inline bool hasRecievedFirstMessage() const { return has_recieved_first_message_; }
   void callback(sensor_msgs::msg::Imu::ConstSharedPtr msg);
+  inline void setMeasurementCallback(std::function<void(double)> callback)
+  {
+    measurement_callback_ = std::move(callback);
+  }
   bool estimateAttitude(gtsam::Rot3 & R_W_B, V3D & estimated_acc_bias, V3D & estimated_gyro_bias);
   void getInterpolatedMeasurements(
     const double ts_start, const double ts_end, ImuBuffer & measurements,

@@ -61,6 +61,7 @@ struct ManagerConfig
   std::string logs_directory = "/tmp/";
   std::string log_level = "info";
   float max_measurement_latency = 0.1;  // s
+  float imu_only_timeout = 0.2;         // s; <= 0 disables IMU-only fallback
   SmootherConfig smoother;
 };
 
@@ -106,6 +107,9 @@ private:
   gtsam::Values optimized_values_;
   std::map<double, gtsam::Key> ts_key_map_;
   std::mutex graph_mutex_;
+  double first_imu_ts_ = 0.0;
+  double last_exteroceptive_ts_ = 0.0;
+  double last_imu_only_update_ts_ = 0.0;
   mimosa_msgs::msg::GraphManagerDebug debug_msg_;
 
   // Outputs
@@ -119,6 +123,7 @@ private:
 
 public:
   Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager);
+  ~Manager();
   // The one step factors are for things that do not require the two step process. Eg. Radar
   DeclarationResult declare(
     const double ts, gtsam::Key & key, const bool use_to_init,
@@ -161,6 +166,10 @@ private:
   void rekeyOneStepFactors(
     const gtsam::NonlinearFactorGraph & one_step_factors, const gtsam::Key new_key,
     gtsam::NonlinearFactorGraph & rekeyed_one_step_factors);
+  DeclarationResult declareNoLock(
+    const double ts, gtsam::Key & key, const bool use_to_init,
+    const gtsam::NonlinearFactorGraph & one_step_factors);
+  void handleImuMeasurement(const double ts);
   void defineNoLock(
     const gtsam::NonlinearFactorGraph & graph, gtsam::Values & optimized_values,
     const DeclarationResult result);

@@ -42,7 +42,11 @@ Manager::Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager)
   pub_odometry_ = pnh.create_publisher<nav_msgs::msg::Odometry>("graph/odometry", 1);
   pub_transform_stamped_ = pnh.create_publisher<geometry_msgs::msg::TransformStamped>("graph/transform", 1);
   pub_optimized_path_ = pnh.create_publisher<nav_msgs::msg::Path>("graph/optimized_path", 1);
+
+  imu_manager_->setMeasurementCallback([this](const double ts) { handleImuMeasurement(ts); });
 }
+
+Manager::~Manager() { imu_manager_->setMeasurementCallback({}); }
 
 gtsam::ISAM2Params Manager::getISAM2Params() const
 {
@@ -142,6 +146,14 @@ Manager::DeclarationResult Manager::declare(
   const gtsam::NonlinearFactorGraph & one_step_factors)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
+  last_exteroceptive_ts_ = std::max(last_exteroceptive_ts_, ts);
+  return declareNoLock(ts, key, use_to_init, one_step_factors);
+}
+
+Manager::DeclarationResult Manager::declareNoLock(
+  const double ts, gtsam::Key & key, const bool use_to_init,
+  const gtsam::NonlinearFactorGraph & one_step_factors)
+{
 
   key = getNextKey();
 
@@ -500,6 +512,40 @@ Manager::DeclarationResult Manager::declare(
   return Manager::DeclarationResult::SUCCESS_NORMAL;
 }
 
+void Manager::handleImuMeasurement(const double ts)
+{
+  if (config_.imu_only_timeout <= 0.0) return;
+
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+
+  if (first_imu_ts_ == 0.0) {
+    first_imu_ts_ = ts;
+    return;
+  }
+
+  const double last_update_ts =
+    std::max({first_imu_ts_, last_exteroceptive_ts_, last_imu_only_update_ts_});
+  if (ts - last_update_ts < config_.imu_only_timeout) return;
+
+  gtsam::Key key;
+  const auto result = declareNoLock(ts, key, true, {});
+  if (
+    result != DeclarationResult::SUCCESS_INITIALIZED &&
+    result != DeclarationResult::SUCCESS_NORMAL) {
+    return;
+  }
+
+  last_imu_only_update_ts_ = ts;
+  imu_manager_->setPropagationBaseState(state_);
+
+  // initializeGraph() already publishes the initial state. Normal declarations with no
+  // exteroceptive factors deliberately do not publish, so publish the IMU-only update here.
+  if (result == DeclarationResult::SUCCESS_NORMAL) {
+    publishResults();
+  }
+  logger_->debug("IMU-only graph update at ts {} after sensor timeout", ts);
+}
+
 void Manager::getCurrentState(State & state)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
@@ -658,8 +704,11 @@ void Manager::initializeGraph(
   const auto prior_noise_gravity =
     gtsam::noiseModel::Isotropic::Sigma(2, config_.smoother.initial_gravity_sigma);  // m/s^2
 
-  const gtsam::Unit3 n_gravity_direction =
-    gtsam::Unit3(imu_manager_->getPreintegratorParams()->getGravity());
+  const V3D gravity = imu_manager_->getPreintegratorParams()->getGravity();
+  // Gravity is represented in the graph by a direction and a separately configured magnitude.
+  // Its direction is immaterial when that magnitude is zero, but Unit3 still needs a valid vector.
+  const V3D gravity_direction = gravity.squaredNorm() > 0.0 ? gravity : V3D(0.0, 0.0, 1.0);
+  const gtsam::Unit3 n_gravity_direction(gravity_direction);
 
   gtsam::NonlinearFactorGraph graph;
   graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(key), T_W_B, prior_noise_pose);
@@ -701,11 +750,16 @@ void Manager::publishResults()
     tf2_broadcaster_, state_.navState().pose(), config_.map_frame, config_.body_frame, state_.ts());
 
   // Broadcast the nav to map transform
-  const V3D n_g_direction = imu_manager_->config().preintegration.gravity.normalized();
-  V3D w_g_direction = state_.gravity().unitVector();
-  // n_g = T_N_W * w_g
-  gtsam::Pose3 T_N_W = gtsam::Pose3(
-    gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(w_g_direction, n_g_direction)), V3D::Zero());
+  const V3D configured_gravity = imu_manager_->config().preintegration.gravity;
+  gtsam::Pose3 T_N_W;
+  if (configured_gravity.squaredNorm() > 0.0) {
+    const V3D n_g_direction = configured_gravity.normalized();
+    const V3D w_g_direction = state_.gravity().unitVector();
+    // n_g = T_N_W * w_g
+    T_N_W = gtsam::Pose3(
+      gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(w_g_direction, n_g_direction)),
+      V3D::Zero());
+  }
   broadcastTransform(
     tf2_static_broadcaster_, T_N_W, config_.navigation_frame, config_.map_frame, 0.0);
 
@@ -834,9 +888,11 @@ void declare_config(ManagerConfig & config)
     NameSpace ns("graph/manager");
     field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
     field(config.max_measurement_latency, "max_measurement_latency", "s");
+    field(config.imu_only_timeout, "imu_only_timeout", "s");
     field(config.smoother, "smoother");
   }
 
+  check(config.imu_only_timeout, GE, 0.0, "imu_only_timeout");
   check(config.body_frame, NE, config.map_frame, "body_frame");
 }
 

@@ -129,6 +129,10 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     }
   }
 
+  if (measurement_callback_) {
+    measurement_callback_(ts);
+  }
+
   if (!propagate) return;
 
   gtsam::NavState nav_state;
@@ -248,7 +252,8 @@ bool Manager::estimateAttitude(
   // Set the gyro bias - this assumes that we are stationary
   estimated_gyro_bias = gyro_mean;
 
-  if (config_.preintegration.gravity_aligned_initialization) {
+  const double gravity_norm = config_.preintegration.gravity.norm();
+  if (config_.preintegration.gravity_aligned_initialization && gravity_norm > 0.0) {
     const V3D & gravity_W = config_.preintegration.gravity;
     const V3D specific_force_W = -gravity_W;
 
@@ -270,7 +275,7 @@ bool Manager::estimateAttitude(
 
     // Assuming this orientation, rescale the measured direction to the configured gravity norm.
     const V3D estimated_gravity_vector =
-      acc_mean.normalized() * config_.preintegration.gravity.norm();
+      acc_mean.normalized() * gravity_norm;
 
     // This is then used to estimate the accelerometer bias
     estimated_acc_bias = acc_mean - estimated_gravity_vector;
@@ -279,9 +284,12 @@ bool Manager::estimateAttitude(
   } else {
     // Without gravity alignment, initialize only the requested heading.
     R_W_B = initial_yaw ? gtsam::Rot3::Yaw(*initial_yaw) : gtsam::Rot3::Identity();
-    // Choose gravity so the measured specific force is consistent with this orientation.
-    V3D gravity =
-      R_W_B * (-acc_mean.normalized() * config_.preintegration.gravity.norm());
+    // Choose gravity so the measured specific force is consistent with this orientation. When
+    // gravity is disabled, its direction is undefined and the stationary acceleration is bias.
+    V3D gravity = V3D::Zero();
+    if (gravity_norm > 0.0) {
+      gravity = R_W_B * (-acc_mean.normalized() * gravity_norm);
+    }
     estimated_acc_bias = acc_mean + R_W_B.inverse() * gravity;
     preintegrator_params_ = generatePreintegratorParams(gravity);
   }
@@ -594,7 +602,6 @@ void declare_config(PreintegrationConfig & config)
   check(config.gyro_bias_random_walk, GT, 0.0, "gyro_bias_random_walk");
   check(config.integration_sigma, GE, 0.0, "integration_sigma");
   checkCondition(config.gravity.allFinite(), "gravity must contain only finite values");
-  checkCondition(config.gravity.norm() > 0.0, "gravity must be non-zero");
 }
 
 void declare_config(ManagerConfig & config)

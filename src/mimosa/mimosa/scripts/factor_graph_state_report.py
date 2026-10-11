@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -17,10 +18,12 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 
 EXPECTED_TYPE = "mimosa_msgs/msg/FactorGraphState"
+IMU_TYPE = "sensor_msgs/msg/Imu"
 GPS_TYPE = "sensor_msgs/msg/NavSatFix"
 ODOMETRY_TYPE = "nav_msgs/msg/Odometry"
 POSE_STAMPED_TYPE = "geometry_msgs/msg/PoseStamped"
 DEFAULT_IMU_TOPIC = "/debug/imu/state"
+DEFAULT_RAW_IMU_TOPIC = "/sensing/imu/imu_raw"
 DEFAULT_LIDAR_TOPIC = "/debug/lidar/state"
 DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
@@ -149,6 +152,15 @@ class DecodedPose:
 
 
 @dataclass
+class DecodedImu:
+    timestamp: float
+    quaternion: np.ndarray
+    orientation_available: bool
+    angular_velocity: np.ndarray
+    linear_acceleration: np.ndarray
+
+
+@dataclass
 class GpsSeries:
     time: np.ndarray
     position_enu: np.ndarray
@@ -169,8 +181,20 @@ class PoseSeries:
         return len(self.time)
 
 
+@dataclass
+class ImuSeries:
+    time: np.ndarray
+    quaternion: np.ndarray
+    rpy_deg: np.ndarray
+    angular_velocity: np.ndarray
+    linear_acceleration: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.time)
+
+
 class CdrReader:
-    """Minimal CDR decoder for the two message types used by this report."""
+    """Minimal CDR decoder for the message types used by this report."""
 
     def __init__(self, payload: bytes):
         if len(payload) < 4:
@@ -232,9 +256,9 @@ class CdrReader:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Read Mimosa pre-optimization IMU/LiDAR states, optimized odometry, "
-            "NavSatFix GPS, and AWSIM ground truth from a ROS 2 bag, then create an "
-            "interactive Plotly HTML report."
+            "Read raw IMU measurements, Mimosa pre-optimization IMU/LiDAR states, "
+            "optimized odometry, NavSatFix GPS, and AWSIM ground truth from a ROS 2 "
+            "bag, then create an interactive Plotly HTML report."
         )
     )
     parser.add_argument("bag", type=Path, help="ROS 2 bag directory, .db3 file, or .mcap file")
@@ -245,6 +269,11 @@ def parse_args() -> argparse.Namespace:
         help="Output HTML path (default: factor_graph_report.html inside a bag directory)",
     )
     parser.add_argument("--imu-topic", default=DEFAULT_IMU_TOPIC)
+    parser.add_argument(
+        "--raw-imu-topic",
+        default=DEFAULT_RAW_IMU_TOPIC,
+        help="sensor_msgs/msg/Imu input topic plotted in the report",
+    )
     parser.add_argument("--lidar-topic", default=DEFAULT_LIDAR_TOPIC)
     parser.add_argument("--gps-topic", default=DEFAULT_GPS_TOPIC)
     parser.add_argument("--odometry-topic", default=DEFAULT_ODOMETRY_TOPIC)
@@ -384,6 +413,38 @@ def decode_pose_stamped(payload: bytes, bag_timestamp_ns: int) -> DecodedPose:
     return DecodedPose(timestamp, position, quaternion)
 
 
+def decode_imu(payload: bytes, bag_timestamp_ns: int) -> DecodedImu:
+    reader = CdrReader(payload)
+    seconds = reader.int32()
+    nanoseconds = reader.uint32()
+    reader.string()  # header.frame_id
+    quaternion = np.asarray([reader.float64() for _ in range(4)])
+    orientation_covariance = np.asarray([reader.float64() for _ in range(9)])
+    angular_velocity = np.asarray([reader.float64() for _ in range(3)])
+    for _ in range(9):
+        reader.float64()  # angular_velocity_covariance
+    linear_acceleration = np.asarray([reader.float64() for _ in range(3)])
+    for _ in range(9):
+        reader.float64()  # linear_acceleration_covariance
+    timestamp = (
+        bag_timestamp_ns * 1e-9
+        if seconds == 0 and nanoseconds == 0
+        else float(seconds) + float(nanoseconds) * 1e-9
+    )
+    orientation_available = (
+        orientation_covariance[0] != -1.0
+        and np.isfinite(quaternion).all()
+        and np.dot(quaternion, quaternion) > 1.0e-12
+    )
+    return DecodedImu(
+        timestamp,
+        quaternion,
+        orientation_available,
+        angular_velocity,
+        linear_acceleration,
+    )
+
+
 def empty_series() -> StateSeries:
     return StateSeries(
         time=np.empty(0),
@@ -439,6 +500,41 @@ def records_to_pose_series(records: List[DecodedPose]) -> PoseSeries:
         position=np.asarray([item.position for item in records]),
         quaternion=quaternions,
         rpy_deg=rpy,
+    )
+
+
+def records_to_imu_series(records: List[DecodedImu]) -> ImuSeries:
+    if not records:
+        return ImuSeries(
+            np.empty(0),
+            np.empty((0, 4)),
+            np.empty((0, 3)),
+            np.empty((0, 3)),
+            np.empty((0, 3)),
+        )
+    records.sort(key=lambda item: item.timestamp)
+    quaternions = np.asarray([item.quaternion for item in records])
+    rpy = np.full((len(records), 3), np.nan)
+    valid_indices = [
+        index for index, item in enumerate(records) if item.orientation_available
+    ]
+    if valid_indices:
+        valid_rpy = np.asarray(
+            [
+                quaternion_to_rpy_deg(
+                    quaternions[index] / np.linalg.norm(quaternions[index])
+                )
+                for index in valid_indices
+            ]
+        )
+        valid_rpy = np.rad2deg(np.unwrap(np.deg2rad(valid_rpy), axis=0))
+        rpy[valid_indices] = valid_rpy
+    return ImuSeries(
+        time=np.asarray([item.timestamp for item in records]),
+        quaternion=quaternions,
+        rpy_deg=rpy,
+        angular_velocity=np.asarray([item.angular_velocity for item in records]),
+        linear_acceleration=np.asarray([item.linear_acceleration for item in records]),
     )
 
 
@@ -584,13 +680,15 @@ def read_mcap_files(
 def read_bag(
     bag_path: Path,
     imu_topic: str,
+    raw_imu_topic: str,
     lidar_topic: str,
     gps_topic: str,
     odometry_topic: str,
     awsim_topic: str,
-) -> Tuple[Dict[str, StateSeries], GpsSeries, PoseSeries, PoseSeries]:
+) -> Tuple[Dict[str, StateSeries], ImuSeries, GpsSeries, PoseSeries, PoseSeries]:
     decoders = {
         imu_topic: decode_state,
+        raw_imu_topic: decode_imu,
         lidar_topic: decode_state,
         gps_topic: decode_gps,
         odometry_topic: decode_odometry,
@@ -604,13 +702,15 @@ def read_bag(
 
     missing = [topic for topic in decoders if topic not in discovered_types]
     if missing:
-        available = "\n  ".join(sorted(discovered_types))
-        raise RuntimeError(
-            f"Required topic(s) not found: {', '.join(missing)}\nAvailable topics:\n  {available}"
+        print(
+            "Warning: topic(s) not found; the report will omit their data: "
+            + ", ".join(missing),
+            file=sys.stderr,
         )
 
     expected_types = {
         imu_topic: EXPECTED_TYPE,
+        raw_imu_topic: IMU_TYPE,
         lidar_topic: EXPECTED_TYPE,
         gps_topic: GPS_TYPE,
         odometry_topic: ODOMETRY_TYPE,
@@ -619,7 +719,8 @@ def read_bag(
     wrong_types = [
         f"{topic}: expected {expected_types[topic]}, found {discovered_types[topic]}"
         for topic in decoders
-        if discovered_types[topic] != expected_types[topic]
+        if topic in discovered_types
+        and discovered_types[topic] != expected_types[topic]
     ]
     if wrong_types:
         raise RuntimeError("Unexpected topic type(s): " + ", ".join(wrong_types))
@@ -630,6 +731,7 @@ def read_bag(
     }
     return (
         states,
+        records_to_imu_series(records[raw_imu_topic]),
         records_to_gps_series(records[gps_topic]),
         records_to_pose_series(records[odometry_topic]),
         records_to_pose_series(records[awsim_topic]),
@@ -688,11 +790,15 @@ def transform_positions(
 
 def zero_at_first_position(positions: np.ndarray) -> np.ndarray:
     """Express a position series relative to its first sample."""
+    if len(positions) == 0:
+        return positions.copy()
     return positions - positions[0]
 
 
 def gps_component_figure(
     component: int,
+    raw_imu_time: np.ndarray,
+    raw_imu_position: np.ndarray,
     imu_time: np.ndarray,
     imu_position: np.ndarray,
     imu_cumulative_position: np.ndarray,
@@ -728,6 +834,17 @@ def gps_component_figure(
         row_heights=[0.68, 0.32],
         vertical_spacing=0.1,
         subplot_titles=(f"Position {axis}", f"Position {axis} errors"),
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=raw_imu_time,
+            y=raw_imu_position[:, component],
+            name="Raw IMU integration",
+            mode="lines",
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
     )
     figure.add_trace(
         go.Scatter(
@@ -894,18 +1011,36 @@ def gps_component_figure(
     figure.update_yaxes(title_text=f"Relative {axis} [m]", row=1, col=1)
     figure.update_yaxes(title_text="Error [m]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
+    figure.update_traces(legend="legend", row=1, col=1)
+    figure.update_traces(legend="legend2", row=2, col=1)
     figure.update_layout(
         title=f"Position {axis}: Mimosa output and AWSIM ground truth",
         height=700,
         hovermode="x unified",
         template="plotly_white",
-        legend={"orientation": "h"},
+        legend={
+            "title": {"text": "Position"},
+            "x": 1.02,
+            "xanchor": "left",
+            "y": 1.0,
+            "yanchor": "top",
+        },
+        legend2={
+            "title": {"text": "Position errors"},
+            "x": 1.02,
+            "xanchor": "left",
+            "y": figure.layout.yaxis2.domain[1],
+            "yanchor": "top",
+        },
     )
     return figure
 
 
 def orientation_component_figure(
     component: int,
+    raw_imu_time: np.ndarray,
+    raw_imu_integrated_orientation: np.ndarray,
+    raw_imu_message_orientation: np.ndarray,
     imu_time: np.ndarray,
     imu_orientation: np.ndarray,
     imu_cumulative_orientation: np.ndarray,
@@ -937,6 +1072,28 @@ def orientation_component_figure(
         row_heights=[0.68, 0.32],
         vertical_spacing=0.1,
         subplot_titles=(angle, f"{angle} differences"),
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=raw_imu_time,
+            y=raw_imu_integrated_orientation[:, component],
+            name="Raw IMU integration",
+            mode="lines",
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=raw_imu_time,
+            y=raw_imu_message_orientation[:, component],
+            name="Raw IMU message orientation",
+            mode="lines",
+            visible="legendonly",
+        ),
+        row=1,
+        col=1,
     )
     figure.add_trace(
         go.Scatter(
@@ -1080,17 +1237,61 @@ def orientation_component_figure(
     figure.update_yaxes(title_text="Angle [deg]", row=1, col=1)
     figure.update_yaxes(title_text="Difference [deg]", row=2, col=1, zeroline=True)
     figure.update_xaxes(title_text="Time from first sample [s]", row=2, col=1)
+    figure.update_traces(legend="legend", row=1, col=1)
+    figure.update_traces(legend="legend2", row=2, col=1)
     figure.update_layout(
         title=f"Orientation {angle.lower()}: Mimosa output and AWSIM ground truth",
         height=700,
         hovermode="x unified",
         template="plotly_white",
-        legend={"orientation": "h"},
+        legend={
+            "title": {"text": "Orientation"},
+            "x": 1.02,
+            "xanchor": "left",
+            "y": 1.0,
+            "yanchor": "top",
+        },
+        legend2={
+            "title": {"text": "Orientation differences"},
+            "x": 1.02,
+            "xanchor": "left",
+            "y": figure.layout.yaxis2.domain[1],
+            "yanchor": "top",
+        },
+    )
+    return figure
+
+
+def imu_measurement_figure(
+    time: np.ndarray,
+    values: np.ndarray,
+    title: str,
+    yaxis_title: str,
+) -> go.Figure:
+    figure = go.Figure()
+    for component, axis in enumerate(("x", "y", "z")):
+        figure.add_trace(
+            go.Scatter(
+                x=time,
+                y=values[:, component],
+                name=axis,
+                mode="lines",
+            )
+        )
+    figure.update_layout(
+        title=title,
+        height=500,
+        hovermode="x unified",
+        template="plotly_white",
+        legend={"title": {"text": "Axis"}, "orientation": "h"},
+        xaxis_title="Time from first sample [s]",
+        yaxis_title=yaxis_title,
     )
     return figure
 
 
 def gps_trajectory_figure(
+    raw_imu_position: np.ndarray,
     imu_position: np.ndarray,
     lidar_position: np.ndarray,
     imu_cumulative_position: np.ndarray,
@@ -1101,6 +1302,7 @@ def gps_trajectory_figure(
 ) -> go.Figure:
     figure = go.Figure()
     for name, position in (
+        ("Raw IMU integration", raw_imu_position),
         ("IMU", imu_position),
         ("LiDAR", lidar_position),
         ("IMU pose_delta cumsum", imu_cumulative_position),
@@ -1160,8 +1362,97 @@ def rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
     )[0:3]
 
 
+def integrate_imu_measurements(
+    series: ImuSeries,
+    initial_position: np.ndarray,
+    initial_quaternion: np.ndarray,
+    initialization_duration: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Integrate gyro and accelerometer samples into position and orientation.
+
+    The initial interval is assumed stationary, matching Mimosa's IMU
+    initialization: its mean angular velocity is treated as gyro bias and its
+    mean world-frame specific force is removed as gravity plus accelerometer
+    bias. Position and orientation are anchored by the supplied initial pose;
+    velocity starts at zero. The sensor_msgs/Imu.orientation field is never
+    used by the integration.
+    """
+    if len(series) == 0:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    quaternion = np.asarray(initial_quaternion, dtype=float)
+    quaternion_norm = np.linalg.norm(quaternion)
+    if not np.isfinite(quaternion).all() or quaternion_norm <= 1.0e-12:
+        quaternion = np.asarray([0.0, 0.0, 0.0, 1.0])
+    else:
+        quaternion = quaternion / quaternion_norm
+
+    initialization_mask = series.time <= series.time[0] + initialization_duration
+    if not np.any(initialization_mask):
+        initialization_mask[0] = True
+    gyro_bias = np.mean(series.angular_velocity[initialization_mask], axis=0)
+
+    quaternions = np.empty((len(series), 4))
+    quaternions[0] = quaternion
+    for index in range(1, len(series)):
+        dt = series.time[index] - series.time[index - 1]
+        if not np.isfinite(dt) or dt <= 0.0:
+            quaternions[index] = quaternion
+            continue
+        angular_velocity = 0.5 * (
+            series.angular_velocity[index - 1] + series.angular_velocity[index]
+        ) - gyro_bias
+        if np.abs(angular_velocity).max()> 1.0e-12:
+            print(f"Warning: large angular velocity detected at index {index}: {angular_velocity}")
+        angle = np.linalg.norm(angular_velocity) * dt
+        if angle > 0.0 and np.isfinite(angle):
+            axis = angular_velocity / np.linalg.norm(angular_velocity)
+            delta_quaternion = np.concatenate(
+                (axis * math.sin(0.5 * angle), [math.cos(0.5 * angle)])
+            )
+            quaternion = quaternion_multiply(quaternion, delta_quaternion)
+            quaternion = quaternion / np.linalg.norm(quaternion)
+        quaternions[index] = quaternion
+
+    world_specific_force = np.asarray(
+        [
+            rotate_vector(quaternion, acceleration)
+            for quaternion, acceleration in zip(
+                quaternions, series.linear_acceleration
+            )
+        ]
+    )
+    stationary_specific_force = np.mean(
+        world_specific_force[initialization_mask], axis=0
+    )
+    world_acceleration = world_specific_force - stationary_specific_force
+
+    position = np.asarray(initial_position, dtype=float)
+    if position.shape != (3,) or not np.isfinite(position).all():
+        position = np.zeros(3)
+    positions = np.empty((len(series), 3))
+    positions[0] = position
+    velocity = np.zeros(3)
+    for index in range(1, len(series)):
+        dt = series.time[index] - series.time[index - 1]
+        if not np.isfinite(dt) or dt <= 0.0:
+            positions[index] = positions[index - 1]
+            continue
+        acceleration = 0.5 * (
+            world_acceleration[index - 1] + world_acceleration[index]
+        )
+        positions[index] = positions[index - 1] + velocity * dt + 0.5 * acceleration * dt**2
+        velocity = velocity + acceleration * dt
+
+    rpy = np.asarray([quaternion_to_rpy_deg(value) for value in quaternions])
+    rpy = np.rad2deg(np.unwrap(np.deg2rad(rpy), axis=0))
+    return positions, rpy
+
+
 def accumulate_pose_deltas(series: StateSeries) -> Tuple[np.ndarray, np.ndarray]:
     """Compose body-frame deltas, anchored to the first recorded orientation."""
+    if len(series) == 0:
+        return np.empty((0, 3)), np.empty((0, 3))
     positions = np.empty((len(series), 3))
     quaternions = np.empty((len(series), 4))
     position = np.zeros(3)
@@ -1207,20 +1498,12 @@ def summary_html(
     git_branch: str,
     git_commit: str,
     imu: StateSeries,
+    raw_imu: ImuSeries,
     lidar: StateSeries,
     gps: GpsSeries,
     output: PoseSeries,
     awsim: PoseSeries,
-    matched_count: int,
-    output_matched_count: int,
-    position_delta: np.ndarray,
-    orientation_delta: np.ndarray,
-    cumulative_position_delta: np.ndarray,
-    cumulative_orientation_delta: np.ndarray,
     gps_alignment: str,
-    imu_gps_error: np.ndarray,
-    lidar_gps_error: np.ndarray,
-    gps_output_error: np.ndarray,
     output_gt_position_error: np.ndarray,
     output_gt_orientation_error: np.ndarray,
 ) -> str:
@@ -1246,87 +1529,16 @@ def summary_html(
         ("Git branch", git_branch),
         ("Git commit", git_commit),
         ("IMU samples", str(len(imu))),
+        ("Raw IMU samples", str(len(raw_imu))),
+        (
+            "Raw IMU samples with message orientation",
+            str(np.count_nonzero(np.isfinite(raw_imu.rpy_deg[:, 0]))),
+        ),
         ("LiDAR samples", str(len(lidar))),
         ("Mimosa output samples", str(len(output))),
         ("AWSIM ground truth samples", str(len(awsim))),
         ("Valid GPS samples", str(len(gps))),
-        ("LiDAR/IMU matched samples", str(matched_count)),
-        ("Mimosa output/IMU matched samples", str(output_matched_count)),
-        ("Mean LiDAR/IMU position difference", metric(np.linalg.norm(position_delta, axis=1), np.mean) + " m"),
-        ("Maximum LiDAR/IMU position difference", metric(np.linalg.norm(position_delta, axis=1), np.max) + " m"),
-        (
-            "Mean absolute LiDAR/IMU orientation difference",
-            metric(np.abs(orientation_delta), np.mean) + " deg",
-        ),
-        (
-            "Maximum absolute LiDAR/IMU orientation difference",
-            metric(np.abs(orientation_delta), np.max) + " deg",
-        ),
-        (
-            "Mean cumulative-delta LiDAR/IMU position difference",
-            metric(np.linalg.norm(cumulative_position_delta, axis=1), np.mean) + " m",
-        ),
-        (
-            "Maximum cumulative-delta LiDAR/IMU position difference",
-            metric(np.linalg.norm(cumulative_position_delta, axis=1), np.max) + " m",
-        ),
-        (
-            "Mean absolute cumulative-delta LiDAR/IMU orientation difference",
-            metric(np.abs(cumulative_orientation_delta), np.mean) + " deg",
-        ),
-        (
-            "Maximum absolute cumulative-delta LiDAR/IMU orientation difference",
-            metric(np.abs(cumulative_orientation_delta), np.max) + " deg",
-        ),
         ("GPS position alignment", gps_alignment),
-        ("IMU/GPS matched samples", str(len(imu_gps_error))),
-        ("LiDAR/GPS matched samples", str(len(lidar_gps_error))),
-        (
-            "IMU position RMSE against GPS",
-            metric(np.linalg.norm(imu_gps_error, axis=1), lambda value: np.sqrt(np.mean(value**2)))
-            + " m",
-        ),
-        (
-            "IMU mean position error against GPS",
-            metric(np.linalg.norm(imu_gps_error, axis=1), np.mean) + " m",
-        ),
-        (
-            "IMU maximum position error against GPS",
-            metric(np.linalg.norm(imu_gps_error, axis=1), np.max) + " m",
-        ),
-        (
-            "LiDAR position RMSE against GPS",
-            metric(
-                np.linalg.norm(lidar_gps_error, axis=1),
-                lambda value: np.sqrt(np.mean(value**2)),
-            )
-            + " m",
-        ),
-        (
-            "LiDAR mean position error against GPS",
-            metric(np.linalg.norm(lidar_gps_error, axis=1), np.mean) + " m",
-        ),
-        (
-            "LiDAR maximum position error against GPS",
-            metric(np.linalg.norm(lidar_gps_error, axis=1), np.max) + " m",
-        ),
-        ("GPS/Mimosa output matched samples", str(len(gps_output_error))),
-        (
-            "Mimosa output position RMSE against GPS",
-            metric(
-                np.linalg.norm(gps_output_error, axis=1),
-                lambda value: np.sqrt(np.mean(value**2)),
-            )
-            + " m",
-        ),
-        (
-            "Mimosa output mean position error against GPS",
-            metric(np.linalg.norm(gps_output_error, axis=1), np.mean) + " m",
-        ),
-        (
-            "Mimosa output maximum position error against GPS",
-            metric(np.linalg.norm(gps_output_error, axis=1), np.max) + " m",
-        ),
         ("Mimosa output/AWSIM GT matched samples", str(len(output_gt_position_error))),
         (
             "AWSIM GT - Mimosa mean position error",
@@ -1417,6 +1629,7 @@ def write_report(
     output: Path,
     bag_path: Path,
     imu: StateSeries,
+    raw_imu: ImuSeries,
     lidar: StateSeries,
     gps: GpsSeries,
     mimosa_output: PoseSeries,
@@ -1427,14 +1640,40 @@ def write_report(
     plotlyjs: str,
 ) -> None:
     git_branch, git_commit = git_revision()
-    start_time = min(
-        imu.time[0], lidar.time[0], gps.time[0], mimosa_output.time[0], awsim.time[0]
-    )
+    available_start_times = [
+        series.time[0]
+        for series in (imu, raw_imu, lidar, gps, mimosa_output, awsim)
+        if len(series) > 0
+    ]
+    if not available_start_times:
+        raise RuntimeError("The bag contains no usable messages for the report")
+    start_time = min(available_start_times)
     imu_time = imu.time - start_time
+    raw_imu_time = raw_imu.time - start_time
     lidar_time = lidar.time - start_time
     gps_time = gps.time - start_time
     output_time = mimosa_output.time - start_time
     awsim_time = awsim.time - start_time
+
+    raw_imu_initial_pose_source = "the report origin with identity orientation"
+    raw_imu_initial_position = np.zeros(3)
+    raw_imu_initial_quaternion = np.asarray([0.0, 0.0, 0.0, 1.0])
+    raw_imu_reference = "none"
+    if len(mimosa_output) > 0:
+        raw_imu_initial_pose_source = "the first Mimosa output pose"
+        raw_imu_initial_position = mimosa_output.position[0]
+        raw_imu_initial_quaternion = mimosa_output.quaternion[0]
+        raw_imu_reference = "mimosa"
+    elif len(awsim) > 0:
+        raw_imu_initial_pose_source = "the first AWSIM ground-truth pose"
+        raw_imu_initial_position = awsim.position[0]
+        raw_imu_initial_quaternion = awsim.quaternion[0]
+        raw_imu_reference = "awsim"
+    raw_imu_integrated_position, raw_imu_integrated_rpy = integrate_imu_measurements(
+        raw_imu,
+        raw_imu_initial_position,
+        raw_imu_initial_quaternion,
+    )
 
     lidar_matches, imu_matches = nearest_matches(imu.time, lidar.time, max_time_difference)
     matched_time = lidar.time[lidar_matches] - start_time
@@ -1444,30 +1683,52 @@ def write_report(
     )
     output_orientation_error_time = mimosa_output.time[output_matches] - start_time
 
-    imu_for_alignment, gps_for_alignment = nearest_matches(
-        gps.time, imu.time, gps_max_time_difference
+    rotation = np.eye(3)
+    translation = np.zeros(3)
+    alignment_source = next(
+        (series for series in (imu, lidar, mimosa_output) if len(series) > 0),
+        None,
     )
-    rotation, translation = estimate_position_alignment(
-        imu.position[imu_for_alignment],
-        gps.position_enu[gps_for_alignment],
-        gps_alignment,
-    )
+    if len(gps) > 0 and alignment_source is not None:
+        source_for_alignment, gps_for_alignment = nearest_matches(
+            gps.time, alignment_source.time, gps_max_time_difference
+        )
+        rotation, translation = estimate_position_alignment(
+            alignment_source.position[source_for_alignment],
+            gps.position_enu[gps_for_alignment],
+            gps_alignment,
+        )
     imu_position_aligned = transform_positions(imu.position, rotation, translation)
     lidar_position_aligned = transform_positions(lidar.position, rotation, translation)
     output_position_aligned = transform_positions(
         mimosa_output.position, rotation, translation
     )
-    awsim_for_alignment, gps_for_awsim_alignment = nearest_matches(
-        gps.time, awsim.time, gps_max_time_difference
-    )
-    awsim_rotation, awsim_translation = estimate_position_alignment(
-        awsim.position[awsim_for_alignment],
-        gps.position_enu[gps_for_awsim_alignment],
-        gps_alignment,
-    )
+    awsim_rotation = np.eye(3)
+    awsim_translation = np.zeros(3)
+    if len(gps) > 0 and len(awsim) > 0:
+        awsim_for_alignment, gps_for_awsim_alignment = nearest_matches(
+            gps.time, awsim.time, gps_max_time_difference
+        )
+        awsim_rotation, awsim_translation = estimate_position_alignment(
+            awsim.position[awsim_for_alignment],
+            gps.position_enu[gps_for_awsim_alignment],
+            gps_alignment,
+        )
     awsim_position_aligned = transform_positions(
         awsim.position, awsim_rotation, awsim_translation
     )
+    if raw_imu_reference == "mimosa":
+        raw_imu_integrated_position = transform_positions(
+            raw_imu_integrated_position, rotation, translation
+        )
+    elif raw_imu_reference == "awsim":
+        raw_imu_integrated_position = transform_positions(
+            raw_imu_integrated_position, awsim_rotation, awsim_translation
+        )
+    else:
+        raw_imu_integrated_position = transform_positions(
+            raw_imu_integrated_position, rotation, np.zeros(3)
+        )
 
     orientation_delta = wrapped_angle_difference_deg(
         lidar.rpy_deg[lidar_matches], imu.rpy_deg[imu_matches]
@@ -1496,6 +1757,7 @@ def write_report(
     )
 
     imu_position_aligned = zero_at_first_position(imu_position_aligned)
+    raw_imu_integrated_position = zero_at_first_position(raw_imu_integrated_position)
     lidar_position_aligned = zero_at_first_position(lidar_position_aligned)
     output_position_aligned = zero_at_first_position(output_position_aligned)
     gps_position = zero_at_first_position(gps.position_enu)
@@ -1563,6 +1825,8 @@ def write_report(
         figures.append(
             gps_component_figure(
                 component,
+                raw_imu_time,
+                raw_imu_integrated_position,
                 imu_time,
                 imu_position_aligned,
                 imu_cumulative_position,
@@ -1596,6 +1860,9 @@ def write_report(
         figures.append(
             orientation_component_figure(
                 component,
+                raw_imu_time,
+                raw_imu_integrated_rpy,
+                raw_imu.rpy_deg,
                 imu_time,
                 imu.rpy_deg,
                 imu_cumulative_rpy,
@@ -1622,7 +1889,25 @@ def write_report(
         )
 
     figures.append(
+        imu_measurement_figure(
+            raw_imu_time,
+            raw_imu.linear_acceleration,
+            "Raw IMU linear acceleration",
+            "Acceleration [m/s²]",
+        )
+    )
+    figures.append(
+        imu_measurement_figure(
+            raw_imu_time,
+            raw_imu.angular_velocity,
+            "Raw IMU angular velocity",
+            "Angular velocity [rad/s]",
+        )
+    )
+
+    figures.append(
         gps_trajectory_figure(
+            raw_imu_integrated_position,
             imu_position_aligned,
             lidar_position_aligned,
             imu_cumulative_position,
@@ -1650,20 +1935,12 @@ def write_report(
         git_branch,
         git_commit,
         imu,
+        raw_imu,
         lidar,
         gps,
         mimosa_output,
         awsim,
-        len(lidar_matches),
-        len(output_matches),
-        position_delta,
-        orientation_delta,
-        cumulative_position_delta,
-        cumulative_orientation_delta,
         gps_alignment,
-        imu_gps_error,
-        lidar_gps_error,
-        gps_output_error,
         output_gt_position_error,
         output_gt_orientation_error,
     )
@@ -1686,8 +1963,15 @@ def write_report(
   <h1>Mimosa IMU/LiDAR/output/GPS/AWSIM comparison</h1>
   <p class="note">The AWSIM PoseStamped stream is already expressed in ROS coordinates with Z-up.
   Mimosa and AWSIM positions are aligned independently to GPS using {gps_alignment.upper()}.
-  Orientation traces are raw roll, pitch, and yaw converted from each message quaternion; GPS
-  alignment is not applied to orientations. Mimosa output is paired to the nearest AWSIM
+  The raw IMU pose trace is dead reckoned from angular velocity and linear acceleration. The
+  orientation field of the sensor_msgs/Imu message is shown as a separate orientation trace and
+  does not affect the integration. The first second is assumed
+  stationary to estimate gyroscope bias and world-frame stationary specific force, its initial
+  velocity is zero, and its initial pose is taken from
+  {raw_imu_initial_pose_source}. The raw measurements are
+  also plotted in dedicated three-axis figures. GPS alignment is not applied to orientations.
+  Mimosa output is paired to the
+  nearest AWSIM
   ground-truth sample within {max_time_difference:.6g} s for position and orientation errors. GPS
   is converted from WGS84 to local ENU and matched within {gps_max_time_difference:.6g} s. Each
   position trace is relative to its own first sample, so every trace begins at (0, 0, 0). Errors
@@ -1746,9 +2030,10 @@ def main() -> int:
     load_plotly()
 
     try:
-        series, gps, mimosa_output, awsim = read_bag(
+        series, raw_imu, gps, mimosa_output, awsim = read_bag(
             args.bag.expanduser(),
             args.imu_topic,
+            args.raw_imu_topic,
             args.lidar_topic,
             args.gps_topic,
             args.odometry_topic,
@@ -1759,16 +2044,13 @@ def main() -> int:
 
     imu = series[args.imu_topic]
     lidar = series[args.lidar_topic]
-    if (
-        len(imu) == 0
-        or len(lidar) == 0
-        or len(gps) == 0
-        or len(mimosa_output) == 0
-        or len(awsim) == 0
+    if not any(
+        len(series) > 0 for series in (imu, raw_imu, lidar, gps, mimosa_output, awsim)
     ):
         raise SystemExit(
-            "The bag contains no usable messages: "
-            f"IMU={len(imu)}, LiDAR={len(lidar)}, valid GPS fixes={len(gps)}, "
+            "The bag contains no usable messages for the report: "
+            f"IMU={len(imu)}, raw IMU={len(raw_imu)}, LiDAR={len(lidar)}, "
+            f"valid GPS fixes={len(gps)}, "
             f"Mimosa output={len(mimosa_output)}, AWSIM ground truth={len(awsim)}"
         )
 
@@ -1777,6 +2059,7 @@ def main() -> int:
         output,
         args.bag.expanduser(),
         imu,
+        raw_imu,
         lidar,
         gps,
         mimosa_output,

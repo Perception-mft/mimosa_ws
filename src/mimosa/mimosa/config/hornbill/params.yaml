@@ -29,6 +29,7 @@ graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
+    imu_only_timeout: 0.2 # seconds without an exteroceptive measurement before an IMU-only graph update
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001

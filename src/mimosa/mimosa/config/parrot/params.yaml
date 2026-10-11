@@ -29,6 +29,7 @@ graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
+    imu_only_timeout: 0.2 # seconds without an exteroceptive measurement before an IMU-only graph update
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001
@@ -61,7 +62,7 @@ lidar:
   T_B_OdometryLoggerFrame: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:
     log_level: warn
-    enabled: true
+    enabled: false
     use_to_init: true
     initial_skip: 2 # number of initial pointclouds to drop
     transpose_pointcloud: false # Transpose the pointcloud to have height correspond to the number of rings and width correspond to the number of points per ring

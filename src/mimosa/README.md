@@ -103,8 +103,16 @@ When `--output` is omitted, the report is written to `factor_graph_report.html` 
 directory. The M113 profile configuration is also copied into the report directory as `m113.yaml`
 so the parameters used for the run can be kept with the report.
 
-The report reads GPS ground truth from `/sensing/gnss/nav_sat_fix` and converts valid fixes to a
-local WGS84 ENU frame. It contains one figure for each position axis (`x`, `y`, and `z`) with the
+The report reads raw IMU measurements from `/sensing/imu/imu_raw` (`sensor_msgs/msg/Imu`) and GPS
+ground truth from `/sensing/gnss/nav_sat_fix`. It plots raw three-axis linear acceleration and
+angular velocity in dedicated figures. It also integrates angular velocity and acceleration into
+orientation and position traces for the comparison graphs. The orientation supplied in the IMU
+message is plotted as a separate roll, pitch, and yaw trace but is not used by the integration.
+The integration assumes that the first second is stationary to estimate gyroscope bias and
+stationary specific force. Position and orientation start at the first optimized Mimosa output
+pose, falling back to the first AWSIM ground-truth pose when Mimosa output is unavailable; velocity
+starts at zero. GPS fixes are converted to a local WGS84 ENU frame. The
+report contains one figure for each position axis (`x`, `y`, and `z`) with the
 IMU, LiDAR, optimized Mimosa output (`/mimosa_node/graph/odometry`), and GPS traces plus their
 corresponding GPS errors. It also contains one figure for roll, pitch, and yaw with the IMU, LiDAR,
 and optimized output traces plus their differences against IMU, and an aligned 3D trajectory.
@@ -120,7 +128,8 @@ Mimosa states.
 Use `--gps-alignment translation` when the frames already have the same axes, or
 `--gps-alignment none` when they are already coincident. Use `--gps-max-time-difference` to control
 GPS timestamp matching, `--gps-topic` to override the GPS topic, `--odometry-topic` to override the
-optimized output topic, `--max-time-difference` to control IMU/LiDAR/output matching, and
+optimized output topic, `--raw-imu-topic` to override the raw IMU input topic,
+`--max-time-difference` to control IMU/LiDAR/output matching, and
 `--plotlyjs cdn` to create a smaller report that loads Plotly from the internet.
 
 The report generator is a standalone Python script and does not use ROS Python libraries or require

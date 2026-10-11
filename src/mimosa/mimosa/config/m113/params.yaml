@@ -24,13 +24,14 @@ imu:
     integration_sigma: 0 # Unclear what this is. Set to 0 for now.
     use_2nd_order_coriolis: false
     use_estimated_gravity: false
-    gravity: [0.0, 0.0, 9.81000062] # [m/s^2] Gravity vector in the navigation frame
+    gravity: [0.0, 0.0, -9.81000062] # [m/s^2] Gravity vector in the navigation frame
     gravity_aligned_initialization: true
 
 graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
+    imu_only_timeout: 0.2 # seconds without an exteroceptive measurement before an IMU-only graph update
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001
@@ -97,7 +98,7 @@ lidar:
       target_ivox_map_min_dist_in_voxel: 0.2
       num_corres_points: 5
       max_corres_distance: 1
-      plane_validity_distance: 0.07
+      plane_validity_distance: 0.0007
       lidar_point_noise_std_dev: 0.07
       use_huber: true
       huber_threshold: 1.345
