@@ -110,6 +110,7 @@ private:
   double first_imu_ts_ = 0.0;
   double last_exteroceptive_ts_ = 0.0;
   double last_imu_only_update_ts_ = 0.0;
+  bool imu_only_mode_ = false;
   mimosa_msgs::msg::GraphManagerDebug debug_msg_;
 
   // Outputs
@@ -124,6 +125,7 @@ private:
 public:
   Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager);
   ~Manager();
+  void setImuOnlyMode(const bool enabled);
   // The one step factors are for things that do not require the two step process. Eg. Radar
   DeclarationResult declare(
     const double ts, gtsam::Key & key, const bool use_to_init,

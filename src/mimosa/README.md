@@ -120,7 +120,9 @@ and optimized output traces plus their differences against IMU, and an aligned 3
 The existing position and orientation figures also include traces built by cumulatively composing
 the `pose_delta` values published by the IMU and LiDAR paths, including their difference in each
 error subplot and each cumsum's error against AWSIM ground truth. Each cumulative orientation is
-anchored to that source's first recorded orientation.
+anchored to that source's first recorded orientation. Mimosa output and cumulative-state positions
+are linearly interpolated and their orientations are quaternion-SLERPed to each AWSIM ground-truth
+timestamp before these errors are calculated.
 
 By default the script estimates an SE(3) transform from the Mimosa map frame to the GPS ENU frame
 without changing trajectory scale, and applies that same transform to the IMU, LiDAR, and optimized
@@ -129,7 +131,8 @@ Use `--gps-alignment translation` when the frames already have the same axes, or
 `--gps-alignment none` when they are already coincident. Use `--gps-max-time-difference` to control
 GPS timestamp matching, `--gps-topic` to override the GPS topic, `--odometry-topic` to override the
 optimized output topic, `--raw-imu-topic` to override the raw IMU input topic,
-`--max-time-difference` to control IMU/LiDAR/output matching, and
+`--max-time-difference` to control IMU/LiDAR matching and the maximum distance from an AWSIM
+timestamp to the nearest interpolated-source endpoint, and
 `--plotlyjs cdn` to create a smaller report that loads Plotly from the internet.
 
 The report generator is a standalone Python script and does not use ROS Python libraries or require

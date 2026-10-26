@@ -21,13 +21,12 @@ EXPECTED_TYPE = "mimosa_msgs/msg/FactorGraphState"
 IMU_TYPE = "sensor_msgs/msg/Imu"
 GPS_TYPE = "sensor_msgs/msg/NavSatFix"
 ODOMETRY_TYPE = "nav_msgs/msg/Odometry"
-POSE_STAMPED_TYPE = "geometry_msgs/msg/PoseStamped"
 DEFAULT_IMU_TOPIC = "/debug/imu/state"
 DEFAULT_RAW_IMU_TOPIC = "/sensing/imu/imu_raw"
 DEFAULT_LIDAR_TOPIC = "/debug/lidar/state"
 DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
-DEFAULT_AWSIM_TOPIC = "/control/state/pose"
+DEFAULT_AWSIM_TOPIC = "/awsim/gt/odometry"
 M113_CONFIG_RELATIVE_PATH = Path("config/m113/params.yaml")
 
 go = None
@@ -398,21 +397,6 @@ def decode_odometry(payload: bytes, bag_timestamp_ns: int) -> DecodedPose:
     return DecodedPose(timestamp, position, quaternion)
 
 
-def decode_pose_stamped(payload: bytes, bag_timestamp_ns: int) -> DecodedPose:
-    reader = CdrReader(payload)
-    seconds = reader.int32()
-    nanoseconds = reader.uint32()
-    reader.string()  # header.frame_id
-    position = np.asarray([reader.float64() for _ in range(3)])
-    quaternion = np.asarray([reader.float64() for _ in range(4)])
-    timestamp = (
-        bag_timestamp_ns * 1e-9
-        if seconds == 0 and nanoseconds == 0
-        else float(seconds) + float(nanoseconds) * 1e-9
-    )
-    return DecodedPose(timestamp, position, quaternion)
-
-
 def decode_imu(payload: bytes, bag_timestamp_ns: int) -> DecodedImu:
     reader = CdrReader(payload)
     seconds = reader.int32()
@@ -692,7 +676,7 @@ def read_bag(
         lidar_topic: decode_state,
         gps_topic: decode_gps,
         odometry_topic: decode_odometry,
-        awsim_topic: decode_pose_stamped,
+        awsim_topic: decode_odometry,
     }
     storage_id, storage_files = bag_storage_paths(bag_path)
     if storage_id == "sqlite3":
@@ -714,7 +698,7 @@ def read_bag(
         lidar_topic: EXPECTED_TYPE,
         gps_topic: GPS_TYPE,
         odometry_topic: ODOMETRY_TYPE,
-        awsim_topic: POSE_STAMPED_TYPE,
+        awsim_topic: ODOMETRY_TYPE,
     }
     wrong_types = [
         f"{topic}: expected {expected_types[topic]}, found {discovered_types[topic]}"
@@ -1402,8 +1386,7 @@ def integrate_imu_measurements(
         angular_velocity = 0.5 * (
             series.angular_velocity[index - 1] + series.angular_velocity[index]
         ) - gyro_bias
-        if np.abs(angular_velocity).max()> 1.0e-12:
-            print(f"Warning: large angular velocity detected at index {index}: {angular_velocity}")
+
         angle = np.linalg.norm(angular_velocity) * dt
         if angle > 0.0 and np.isfinite(angle):
             axis = angular_velocity / np.linalg.norm(angular_velocity)
@@ -1961,7 +1944,7 @@ def write_report(
 </head>
 <body>
   <h1>Mimosa IMU/LiDAR/output/GPS/AWSIM comparison</h1>
-  <p class="note">The AWSIM PoseStamped stream is already expressed in ROS coordinates with Z-up.
+  <p class="note">The AWSIM odometry stream is already expressed in ROS coordinates with Z-up.
   Mimosa and AWSIM positions are aligned independently to GPS using {gps_alignment.upper()}.
   The raw IMU pose trace is dead reckoned from angular velocity and linear acceleration. The
   orientation field of the sensor_msgs/Imu message is shown as a separate orientation trace and

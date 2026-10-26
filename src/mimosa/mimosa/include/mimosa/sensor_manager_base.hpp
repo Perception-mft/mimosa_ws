@@ -145,8 +145,10 @@ protected:
       config_.base.sensor_frame, timestamp);
   }
 
+public:
   inline bool isEnabled() const { return config_.base.enabled; }
 
+protected:
   inline bool isImuReady() const
   {
     // This could be simpler but is done this way to provide more informative logging

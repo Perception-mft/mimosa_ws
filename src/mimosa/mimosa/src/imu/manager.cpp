@@ -38,11 +38,6 @@ Manager::Manager(rclcpp::Node & pnh)
     "imu/manager/imu_in", qos,
     [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { callback(msg); }, options);
 
-  if (config_.initial_yaw == InitialYawSource::SIMULATION) {
-    initial_yaw_sub_ = pnh.create_subscription<sensor_msgs::msg::Imu>(
-      "/sensing/imu/imu_raw", qos,
-      [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { initialYawCallback(msg); }, options);
-  }
 }
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams(
@@ -108,6 +103,12 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
 
   if (!has_recieved_first_message_) {
     has_recieved_first_message_ = true;
+  }
+
+  // Keep the yaw synchronized with the accepted IMU sample. Using a second subscription and
+  // latching its first message made initialization depend on DDS callback/startup ordering.
+  if (config_.initial_yaw == InitialYawSource::SIMULATION) {
+    initialYawCallback(msg);
   }
 
   // Add to buffer
@@ -198,14 +199,12 @@ void Manager::initialYawCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg
   if (
     msg->orientation_covariance[0] == -1.0 || !q.coeffs().allFinite() ||
     q.squaredNorm() <= 1.0e-12) {
-    logger_->warn("Ignoring invalid orientation from /sensing/imu/imu_raw");
+    logger_->warn("Ignoring invalid orientation from configured IMU input");
     return;
   }
 
   std::lock_guard<std::mutex> lock(buffer_mutex_);
-  if (!orientation_yaw_) {
-    orientation_yaw_ = gtsam::Rot3(q.normalized()).ypr()(0);
-  }
+  orientation_yaw_ = gtsam::Rot3(q.normalized()).ypr()(0);
 }
 
 bool Manager::estimateAttitude(
@@ -228,27 +227,54 @@ bool Manager::estimateAttitude(
       return false;
     }
 
-    // Accumulate all the measurements
-    for (const auto & itr : buffer_) {
-      acc_mean += itr.second.head<3>();
-      gyro_mean += itr.second.tail<3>();
+    // Use only the most recent initialization window. If an earlier window contained simulator
+    // startup transients or motion, those samples can age out and initialization can recover.
+    const double window_start_ts = buffer_.rbegin()->first - config_.pose_init_wait_secs;
+    auto window_begin = std::lower_bound(
+      buffer_.begin(), buffer_.end(), window_start_ts,
+      [](const ImuMeasurement & measurement, const double ts) { return measurement.first < ts; });
+
+    for (auto itr = window_begin; itr != buffer_.end(); ++itr) {
+      acc_mean += itr->second.head<3>();
+      gyro_mean += itr->second.tail<3>();
     }
-    buffer_size = buffer_.size();
+    buffer_size = std::distance(window_begin, buffer_.end());
     initial_yaw = orientation_yaw_;
+
+    acc_mean /= buffer_size;
+    gyro_mean /= buffer_size;
+
+    double acc_squared_error = 0.0;
+    double gyro_squared_error = 0.0;
+    for (auto itr = window_begin; itr != buffer_.end(); ++itr) {
+      acc_squared_error += (itr->second.head<3>() - acc_mean).squaredNorm();
+      gyro_squared_error += (itr->second.tail<3>() - gyro_mean).squaredNorm();
+    }
+    const double acc_std = std::sqrt(acc_squared_error / buffer_size);
+    const double gyro_std = std::sqrt(gyro_squared_error / buffer_size);
+    const double gravity_error =
+      std::abs(acc_mean.norm() - config_.preintegration.gravity.norm());
+    if (
+      acc_std > config_.pose_init_max_acc_std ||
+      gyro_std > config_.pose_init_max_gyro_std ||
+      gyro_mean.norm() > config_.pose_init_max_gyro_mean ||
+      gravity_error > config_.pose_init_max_gravity_error) {
+      logger_->debug(
+        "IMU initialization window is not stationary: acc_std={} m/s^2, gyro_std={} rad/s, "
+        "gyro_mean={} rad/s, gravity_error={} m/s^2",
+        acc_std, gyro_std, gyro_mean.norm(), gravity_error);
+      return false;
+    }
   }
 
   if (config_.initial_yaw == InitialYawSource::CONFIGURATION) {
     initial_yaw = deg2rad(config_.initial_yaw_deg);
   } else if (!initial_yaw) {
     logger_->warn(
-      "Cannot initialize yaw: no valid orientation has been received on "
-      "/sensing/imu/imu_raw");
+      "Cannot initialize yaw: no valid orientation has been received on the configured IMU input");
     return false;
   }
 
-  // Average IMU measurements
-  acc_mean /= buffer_size;
-  gyro_mean /= buffer_size;
   // Set the gyro bias - this assumes that we are stationary
   estimated_gyro_bias = gyro_mean;
 
@@ -621,6 +647,11 @@ void declare_config(ManagerConfig & config)
       field(config.reliable_qos, "reliable_qos", "bool");
       field(config.max_buffer_duration, "max_buffer_duration", "s");
       field(config.pose_init_wait_secs, "pose_init_wait_secs", "s");
+      field(config.pose_init_max_acc_std, "pose_init_max_acc_std", "m/s^2");
+      field(config.pose_init_max_gyro_std, "pose_init_max_gyro_std", "rad/s");
+      field(config.pose_init_max_gyro_mean, "pose_init_max_gyro_mean", "rad/s");
+      field(
+        config.pose_init_max_gravity_error, "pose_init_max_gravity_error", "m/s^2");
       field(config.interpolation_max_ts_diff, "interpolation_max_ts_diff", "s");
       field(config.extrapolation_max_ts_diff, "extrapolation_max_ts_diff", "s");
       field(config.acc_scale_factor, "acc_scale_factor");
@@ -634,6 +665,10 @@ void declare_config(ManagerConfig & config)
   }
   check(config.max_buffer_duration, GT, 0.5, "max_buffer_duration");
   check(config.pose_init_wait_secs, GE, 0.0, "pose_init_wait_secs");
+  check(config.pose_init_max_acc_std, GT, 0.0, "pose_init_max_acc_std");
+  check(config.pose_init_max_gyro_std, GT, 0.0, "pose_init_max_gyro_std");
+  check(config.pose_init_max_gyro_mean, GT, 0.0, "pose_init_max_gyro_mean");
+  check(config.pose_init_max_gravity_error, GT, 0.0, "pose_init_max_gravity_error");
   check(config.interpolation_max_ts_diff, GT, 0.005, "interpolation_max_ts_diff");
   check(config.extrapolation_max_ts_diff, GT, 0.005, "extrapolation_max_ts_diff");
   check(config.acc_scale_factor, GE, 1.0, "acc_scale_factor");

@@ -68,6 +68,10 @@ struct ManagerConfig
   bool reliable_qos = false;
   float max_buffer_duration = 2.0;         // s
   float pose_init_wait_secs = 1.0;         // s
+  float pose_init_max_acc_std = 0.2;       // m/s^2
+  float pose_init_max_gyro_std = 0.02;     // rad/s
+  float pose_init_max_gyro_mean = 0.05;    // rad/s
+  float pose_init_max_gravity_error = 1.0; // m/s^2
   float interpolation_max_ts_diff = 0.01;  // s
   float extrapolation_max_ts_diff = 0.01;  // s
   float acc_scale_factor = 1.0;            // used only when IMU measurements are in units of g
@@ -88,7 +92,6 @@ private:
 
   // Inputs
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr initial_yaw_sub_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
 
   // Member variables

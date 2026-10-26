@@ -48,6 +48,15 @@ Manager::Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager)
 
 Manager::~Manager() { imu_manager_->setMeasurementCallback({}); }
 
+void Manager::setImuOnlyMode(const bool enabled)
+{
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+  imu_only_mode_ = enabled;
+  logger_->info(
+    "IMU-only mode {}. Graph updates will be triggered {}", enabled ? "enabled" : "disabled",
+    enabled ? "by every accepted IMU measurement" : "by the configured sensor timeout");
+}
+
 gtsam::ISAM2Params Manager::getISAM2Params() const
 {
   gtsam::ISAM2GaussNewtonParams gnp;
@@ -514,7 +523,7 @@ Manager::DeclarationResult Manager::declareNoLock(
 
 void Manager::handleImuMeasurement(const double ts)
 {
-  if (config_.imu_only_timeout <= 0.0) return;
+  if (!imu_only_mode_ && config_.imu_only_timeout <= 0.0) return;
 
   std::lock_guard<std::mutex> lock(graph_mutex_);
 
@@ -525,7 +534,7 @@ void Manager::handleImuMeasurement(const double ts)
 
   const double last_update_ts =
     std::max({first_imu_ts_, last_exteroceptive_ts_, last_imu_only_update_ts_});
-  if (ts - last_update_ts < config_.imu_only_timeout) return;
+  if (!imu_only_mode_ && ts - last_update_ts < config_.imu_only_timeout) return;
 
   gtsam::Key key;
   const auto result = declareNoLock(ts, key, true, {});
@@ -543,7 +552,9 @@ void Manager::handleImuMeasurement(const double ts)
   if (result == DeclarationResult::SUCCESS_NORMAL) {
     publishResults();
   }
-  logger_->debug("IMU-only graph update at ts {} after sensor timeout", ts);
+  logger_->debug(
+    "IMU-only graph update at ts {} {}", ts,
+    imu_only_mode_ ? "for current IMU measurement" : "after sensor timeout");
 }
 
 void Manager::getCurrentState(State & state)

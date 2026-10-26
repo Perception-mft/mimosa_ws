@@ -9,19 +9,23 @@ imu:
     ts_offset: 0
     reliable_qos: true
     max_buffer_duration: 30
-    pose_init_wait_secs: 1
+    pose_init_wait_secs: 5
+    pose_init_max_acc_std: 0.2 # [m/s^2] maximum RMS acceleration variation during initialization
+    pose_init_max_gyro_std: 0.02 # [rad/s] maximum RMS angular-rate variation during initialization
+    pose_init_max_gyro_mean: 0.05 # [rad/s] maximum mean angular rate during initialization
+    pose_init_max_gravity_error: 1.0 # [m/s^2] allowed difference between mean acceleration magnitude and gravity
     interpolation_max_ts_diff: 1 #s
     extrapolation_max_ts_diff: 0.15 #s
     acc_scale_factor: 1 # Scales the accelerometer measurement. Default is 1, which means no scaling. Livox typically reports acc in g, so we need to scale it to m/s^2
     max_acceleration_magnitude: 50 # [m/s^2] Drop acceleration spikes that are not physically plausible for the UGV
-    initial_yaw: simulation #configuration use initial_yaw_deg, or simulation to use the yaw from the simulation. If using simulation, then the initial yaw will be set to the yaw of the first IMU message received.
+    initial_yaw: simulation # configuration uses initial_yaw_deg; simulation uses the latest valid IMU orientation at initialization
     initial_yaw_deg: 0.0
   preintegration:
     acc_noise_density: 0.13886655606357616 # 0.013886655606357616  # [ m / s^2 / sqrt(Hz) ]   ( accel "white noise" ) # Vectornav VN-100 0.0013886655606357616
     acc_bias_random_walk: 8.538212723310593e-05 # [ m / s^3 / sqrt(Hz) ].  ( accel bias diffusion ) # Vectornav VN-100 8.538212723310593e-05
     gyro_noise_density: 5.4380545102010436e-03 # 5.4380545102010436e-04 # [ rad / s / sqrt(Hz) ]   ( gyro "white noise" ) # Vectornav VN-100 5.4380545102010436e-05
     gyro_bias_random_walk: 1.6587925152480572e-06 # [ rad / s^2 / sqrt(Hz) ] ( gyro bias diffusion ) # Vectornav VN-100 1.6587925152480572e-06
-    integration_sigma: 0 # Unclear what this is. Set to 0 for now.
+    integration_sigma: 0 # Numerical uncertainty from integrating position from velocity
     use_2nd_order_coriolis: false
     use_estimated_gravity: false
     gravity: [0.0, 0.0, -9.81000062] # [m/s^2] Gravity vector in the navigation frame
@@ -31,7 +35,7 @@ graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
-    imu_only_timeout: 0.2 # seconds without an exteroceptive measurement before an IMU-only graph update
+    imu_only_timeout: 0.4 # seconds without an exteroceptive measurement before an IMU-only graph update
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001
@@ -93,13 +97,13 @@ lidar:
     neighbor_voxel_mode: 19
     scan_to_map:
       source_voxel_grid_filter_leaf_size: 1
-      source_voxel_grid_min_dist_in_voxel: 0.2
+      source_voxel_grid_min_dist_in_voxel: 0.1
       target_ivox_map_leaf_size: 1
-      target_ivox_map_min_dist_in_voxel: 0.2
+      target_ivox_map_min_dist_in_voxel: 0.1
       num_corres_points: 5
       max_corres_distance: 1
-      plane_validity_distance: 0.0007
-      lidar_point_noise_std_dev: 0.07
+      plane_validity_distance: 0.000007
+      lidar_point_noise_std_dev: 0.00007
       use_huber: true
       huber_threshold: 1.345
       reg_4_dof: false
@@ -168,7 +172,7 @@ odometry:
   T_B_S: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:
     log_level: warn
-    enabled: true
+    enabled: false
     use_to_init: false
     reliable_qos: false
     initial_skip: 2 # number of initial messages to drop

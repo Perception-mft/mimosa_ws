@@ -59,7 +59,7 @@ install(TARGETS ${PROJECT_NAME}_lib mimosa_node
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config rviz plotjuggler data DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config rviz plotjuggler data model DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING PATTERN "*.launch.py")
 install(PROGRAMS
