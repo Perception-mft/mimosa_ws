@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import math
 import shutil
 import sqlite3
@@ -28,6 +29,8 @@ DEFAULT_GPS_TOPIC = "/sensing/gnss/nav_sat_fix"
 DEFAULT_ODOMETRY_TOPIC = "/mimosa_node/graph/odometry"
 DEFAULT_AWSIM_TOPIC = "/awsim/gt/odometry"
 M113_CONFIG_RELATIVE_PATH = Path("config/m113/params.yaml")
+PLOT_MARKER_SIZE = 3
+PLOT_LINE_WIDTH = 0.5
 
 go = None
 pio = None
@@ -779,6 +782,16 @@ def zero_at_first_position(positions: np.ndarray) -> np.ndarray:
     return positions - positions[0]
 
 
+def add_sample_markers(figure: go.Figure) -> None:
+    """Display every data series with sample markers and a thin solid line."""
+    figure.update_traces(
+        mode="lines+markers",
+        marker={"size": PLOT_MARKER_SIZE},
+        line={"width": PLOT_LINE_WIDTH, "dash": "solid"},
+    )
+    figure.update_yaxes(exponentformat="power")
+
+
 def gps_component_figure(
     component: int,
     raw_imu_time: np.ndarray,
@@ -820,7 +833,7 @@ def gps_component_figure(
         subplot_titles=(f"Position {axis}", f"Position {axis} errors"),
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=raw_imu_time,
             y=raw_imu_position[:, component],
             name="Raw IMU integration",
@@ -831,7 +844,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_time,
             y=imu_position[:, component],
             name="IMU",
@@ -842,7 +855,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_time,
             y=lidar_position[:, component],
             name="LiDAR",
@@ -854,7 +867,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_time,
             y=imu_cumulative_position[:, component],
             name="IMU pose_delta cumsum",
@@ -866,7 +879,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_time,
             y=lidar_cumulative_position[:, component],
             name="LiDAR pose_delta cumsum",
@@ -878,7 +891,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=gps_time,
             y=gps_position[:, component],
             name="GPS",
@@ -890,7 +903,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=awsim_time,
             y=awsim_position[:, component],
             name="AWSIM ground truth",
@@ -901,7 +914,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_time,
             y=output_position[:, component],
             name="Mimosa output",
@@ -912,7 +925,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_error_time,
             y=imu_error[:, component],
             name="IMU - GPS",
@@ -923,7 +936,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_error_time,
             y=lidar_error[:, component],
             name="LiDAR - GPS",
@@ -934,7 +947,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_error_time,
             y=output_error[:, component],
             name="GPS - Mimosa output",
@@ -946,7 +959,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_gt_error_time,
             y=output_gt_error[:, component],
             name="AWSIM GT - Mimosa output",
@@ -957,7 +970,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=cumulative_error_time,
             y=cumulative_error[:, component],
             name="LiDAR - IMU pose_delta cumsum",
@@ -969,7 +982,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_cumulative_gt_error_time,
             y=imu_cumulative_gt_error[:, component],
             name="AWSIM GT - IMU pose_delta cumsum",
@@ -981,7 +994,7 @@ def gps_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_cumulative_gt_error_time,
             y=lidar_cumulative_gt_error[:, component],
             name="AWSIM GT - LiDAR pose_delta cumsum",
@@ -1017,6 +1030,7 @@ def gps_component_figure(
             "yanchor": "top",
         },
     )
+    add_sample_markers(figure)
     return figure
 
 
@@ -1058,7 +1072,7 @@ def orientation_component_figure(
         subplot_titles=(angle, f"{angle} differences"),
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=raw_imu_time,
             y=raw_imu_integrated_orientation[:, component],
             name="Raw IMU integration",
@@ -1069,7 +1083,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=raw_imu_time,
             y=raw_imu_message_orientation[:, component],
             name="Raw IMU message orientation",
@@ -1080,7 +1094,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_time,
             y=imu_orientation[:, component],
             name="IMU",
@@ -1091,7 +1105,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_time,
             y=lidar_orientation[:, component],
             name="LiDAR",
@@ -1103,7 +1117,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_time,
             y=imu_cumulative_orientation[:, component],
             name="IMU pose_delta cumsum",
@@ -1115,7 +1129,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_time,
             y=lidar_cumulative_orientation[:, component],
             name="LiDAR pose_delta cumsum",
@@ -1127,7 +1141,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_time,
             y=output_orientation[:, component],
             name="Mimosa output",
@@ -1138,7 +1152,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=awsim_time,
             y=awsim_orientation[:, component],
             name="AWSIM ground truth",
@@ -1149,7 +1163,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_error_time,
             y=lidar_orientation_error[:, component],
             name="LiDAR - IMU",
@@ -1160,7 +1174,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_error_time,
             y=output_orientation_error[:, component],
             name="Mimosa output - IMU",
@@ -1172,7 +1186,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=output_gt_error_time,
             y=output_gt_orientation_error[:, component],
             name="AWSIM GT - Mimosa output",
@@ -1183,7 +1197,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=cumulative_error_time,
             y=cumulative_orientation_error[:, component],
             name="LiDAR - IMU pose_delta cumsum",
@@ -1195,7 +1209,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=imu_cumulative_gt_error_time,
             y=imu_cumulative_gt_orientation_error[:, component],
             name="AWSIM GT - IMU pose_delta cumsum",
@@ -1207,7 +1221,7 @@ def orientation_component_figure(
         col=1,
     )
     figure.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=lidar_cumulative_gt_error_time,
             y=lidar_cumulative_gt_orientation_error[:, component],
             name="AWSIM GT - LiDAR pose_delta cumsum",
@@ -1243,6 +1257,7 @@ def orientation_component_figure(
             "yanchor": "top",
         },
     )
+    add_sample_markers(figure)
     return figure
 
 
@@ -1255,7 +1270,7 @@ def imu_measurement_figure(
     figure = go.Figure()
     for component, axis in enumerate(("x", "y", "z")):
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=time,
                 y=values[:, component],
                 name=axis,
@@ -1271,6 +1286,7 @@ def imu_measurement_figure(
         xaxis_title="Time from first sample [s]",
         yaxis_title=yaxis_title,
     )
+    add_sample_markers(figure)
     return figure
 
 
@@ -1313,8 +1329,13 @@ def gps_trajectory_figure(
         title="Aligned 3D trajectories",
         height=1000,
         template="plotly_white",
-        scene={"xaxis_title": "East [m]", "yaxis_title": "North [m]", "zaxis_title": "Up [m]"},
+        scene={
+            "xaxis_title": "East [m]",
+            "yaxis": {"title": "North [m]", "exponentformat": "power"},
+            "zaxis_title": "Up [m]",
+        },
     )
+    add_sample_markers(figure)
     return figure
 
 
@@ -1902,15 +1923,29 @@ def write_report(
     )
 
     include_plotlyjs = True if plotlyjs == "inline" else "cdn"
-    fragments = []
-    for index, figure in enumerate(figures):
+    plot_config = {"responsive": True, "displaylogo": False}
+    fragments = [
+        pio.to_html(
+            figures[0],
+            full_html=False,
+            include_plotlyjs=include_plotlyjs,
+            config=plot_config,
+        )
+    ]
+    for index, figure in enumerate(figures[1:], start=1):
+        figure_json = pio.to_json(
+            figure, validate=False, pretty=False, remove_uids=True
+        ).replace("</", "<\\/")
+        height = figure.layout.height or 500
         fragments.append(
-            pio.to_html(
-                figure,
-                full_html=False,
-                include_plotlyjs=include_plotlyjs if index == 0 else False,
-                config={"responsive": True, "displaylogo": False},
-            )
+            f"""
+<section class="lazy-plot-container" data-rendered="false">
+  <div id="lazy-plot-{index}" class="lazy-plot" style="height: {height}px">
+    <span>Plot loads when scrolled into view.</span>
+  </div>
+  <script type="application/json" class="plot-spec">{figure_json}</script>
+</section>
+"""
         )
 
     summary = summary_html(
@@ -1940,6 +1975,7 @@ def write_report(
     th, td {{ border: 1px solid #cfd8dc; padding: 0.45rem 0.8rem; text-align: left; }}
     th {{ background: #eceff1; }}
     .note {{ color: #455a64; }}
+    .lazy-plot {{ width: 100%; display: flex; align-items: center; justify-content: center; }}
   </style>
 </head>
 <body>
@@ -1968,6 +2004,52 @@ def write_report(
   <h2>Summary</h2>
   {summary}
   {''.join(fragments)}
+  <script>
+    (() => {{
+      const plotConfig = {json.dumps(plot_config)};
+      const containers = document.querySelectorAll('.lazy-plot-container');
+
+      function renderPlot(container) {{
+        if (container.dataset.rendered !== 'false') return;
+        container.dataset.rendered = 'loading';
+        container.dataset.releaseAfterLoad = 'false';
+        const graph = container.querySelector('.lazy-plot');
+        const spec = JSON.parse(container.querySelector('.plot-spec').textContent);
+        Plotly.newPlot(graph, spec.data, spec.layout, plotConfig)
+          .then(() => {{
+            container.dataset.rendered = 'true';
+            if (container.dataset.releaseAfterLoad === 'true') releasePlot(container);
+          }})
+          .catch((error) => {{
+            container.dataset.rendered = 'error';
+            graph.textContent = `Could not render plot: ${{error}}`;
+          }});
+      }}
+
+      function releasePlot(container) {{
+        if (container.dataset.rendered === 'loading') {{
+          container.dataset.releaseAfterLoad = 'true';
+          return;
+        }}
+        if (container.dataset.rendered !== 'true') return;
+        const graph = container.querySelector('.lazy-plot');
+        Plotly.purge(graph);
+        graph.innerHTML = '<span>Plot loads when scrolled into view.</span>';
+        container.dataset.rendered = 'false';
+      }}
+
+      const observer = new IntersectionObserver(
+        (entries) => {{
+          for (const entry of entries) {{
+            if (entry.isIntersecting) renderPlot(entry.target);
+            else releasePlot(entry.target);
+          }}
+        }},
+        {{ rootMargin: '600px 0px' }}
+      );
+      containers.forEach((container) => observer.observe(container));
+    }})();
+  </script>
 </body>
 </html>
 """

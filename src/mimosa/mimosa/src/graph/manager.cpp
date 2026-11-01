@@ -52,9 +52,15 @@ void Manager::setImuOnlyMode(const bool enabled)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
   imu_only_mode_ = enabled;
-  logger_->info(
-    "IMU-only mode {}. Graph updates will be triggered {}", enabled ? "enabled" : "disabled",
-    enabled ? "by every accepted IMU measurement" : "by the configured sensor timeout");
+  if (!enabled) {
+    logger_->info("IMU-only mode disabled. Graph updates use the configured sensor timeout");
+  } else if (config_.imu_only_update_rate_hz == 0.0) {
+    logger_->info("IMU-only mode enabled. Graph updates run on every accepted IMU measurement");
+  } else {
+    logger_->info(
+      "IMU-only mode enabled. Graph updates are limited to {} Hz",
+      config_.imu_only_update_rate_hz);
+  }
 }
 
 gtsam::ISAM2Params Manager::getISAM2Params() const
@@ -534,7 +540,15 @@ void Manager::handleImuMeasurement(const double ts)
 
   const double last_update_ts =
     std::max({first_imu_ts_, last_exteroceptive_ts_, last_imu_only_update_ts_});
-  if (!imu_only_mode_ && ts - last_update_ts < config_.imu_only_timeout) return;
+  if (imu_only_mode_) {
+    if (
+      config_.imu_only_update_rate_hz > 0.0 &&
+      ts - last_update_ts < 1.0 / config_.imu_only_update_rate_hz) {
+      return;
+    }
+  } else if (ts - last_update_ts < config_.imu_only_timeout) {
+    return;
+  }
 
   gtsam::Key key;
   const auto result = declareNoLock(ts, key, true, {});
@@ -900,10 +914,12 @@ void declare_config(ManagerConfig & config)
     field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
     field(config.max_measurement_latency, "max_measurement_latency", "s");
     field(config.imu_only_timeout, "imu_only_timeout", "s");
+    field(config.imu_only_update_rate_hz, "imu_only_update_rate_hz", "Hz");
     field(config.smoother, "smoother");
   }
 
   check(config.imu_only_timeout, GE, 0.0, "imu_only_timeout");
+  check(config.imu_only_update_rate_hz, GE, 0.0, "imu_only_update_rate_hz");
   check(config.body_frame, NE, config.map_frame, "body_frame");
 }
 

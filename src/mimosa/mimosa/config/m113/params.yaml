@@ -17,7 +17,7 @@ imu:
     interpolation_max_ts_diff: 1 #s
     extrapolation_max_ts_diff: 0.15 #s
     acc_scale_factor: 1 # Scales the accelerometer measurement. Default is 1, which means no scaling. Livox typically reports acc in g, so we need to scale it to m/s^2
-    max_acceleration_magnitude: 50 # [m/s^2] Drop acceleration spikes that are not physically plausible for the UGV
+    max_acceleration_magnitude: 100 # [m/s^2] Drop acceleration spikes that are not physically plausible for the UGV
     initial_yaw: simulation # configuration uses initial_yaw_deg; simulation uses the latest valid IMU orientation at initialization
     initial_yaw_deg: 0.0
   preintegration:
@@ -25,7 +25,7 @@ imu:
     acc_bias_random_walk: 8.538212723310593e-05 # [ m / s^3 / sqrt(Hz) ].  ( accel bias diffusion ) # Vectornav VN-100 8.538212723310593e-05
     gyro_noise_density: 5.4380545102010436e-03 # 5.4380545102010436e-04 # [ rad / s / sqrt(Hz) ]   ( gyro "white noise" ) # Vectornav VN-100 5.4380545102010436e-05
     gyro_bias_random_walk: 1.6587925152480572e-06 # [ rad / s^2 / sqrt(Hz) ] ( gyro bias diffusion ) # Vectornav VN-100 1.6587925152480572e-06
-    integration_sigma: 0 # Numerical uncertainty from integrating position from velocity
+    integration_sigma: 1.0e-4 # Numerical uncertainty from integrating position from velocity
     use_2nd_order_coriolis: false
     use_estimated_gravity: false
     gravity: [0.0, 0.0, -9.81000062] # [m/s^2] Gravity vector in the navigation frame
@@ -35,7 +35,8 @@ graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
-    imu_only_timeout: 0.4 # seconds without an exteroceptive measurement before an IMU-only graph update
+    imu_only_timeout: 0.1 # seconds without an exteroceptive measurement before an IMU-only graph update
+    imu_only_update_rate_hz: 0 # Hz; 0 updates on every IMU message in IMU-only mode
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001
@@ -48,7 +49,7 @@ graph:
       relinearize_skip: 1
       enable_relinearization: true
       evaluate_nonlinear_error: false
-      factorization: CHOLESKY
+      factorization: QR
       cache_linearized_factors: true
       enable_detailed_results: false
       enable_partial_relinearization_check: true
@@ -68,7 +69,7 @@ lidar:
   T_B_OdometryLoggerFrame: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
   manager:
     log_level: warn
-    enabled: true
+    enabled: false
     use_to_init: true
     reliable_qos: true
     initial_skip: 2 # number of initial pointclouds to drop

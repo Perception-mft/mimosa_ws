@@ -62,6 +62,7 @@ struct ManagerConfig
   std::string log_level = "info";
   float max_measurement_latency = 0.1;  // s
   float imu_only_timeout = 0.2;         // s; <= 0 disables IMU-only fallback
+  float imu_only_update_rate_hz = 0.0;  // Hz; zero updates on every IMU message
   SmootherConfig smoother;
 };
 
