@@ -61,8 +61,6 @@ struct ManagerConfig
   std::string logs_directory = "/tmp/";
   std::string log_level = "info";
   float max_measurement_latency = 0.1;  // s
-  float imu_only_timeout = 0.2;         // s; <= 0 disables IMU-only fallback
-  float imu_only_update_rate_hz = 0.0;  // Hz; zero updates on every IMU message
   SmootherConfig smoother;
 };
 
@@ -108,9 +106,6 @@ private:
   gtsam::Values optimized_values_;
   std::map<double, gtsam::Key> ts_key_map_;
   std::mutex graph_mutex_;
-  double first_imu_ts_ = 0.0;
-  double last_exteroceptive_ts_ = 0.0;
-  double last_imu_only_update_ts_ = 0.0;
   bool imu_only_mode_ = false;
   mimosa_msgs::msg::GraphManagerDebug debug_msg_;
 
@@ -173,11 +168,14 @@ private:
     const double ts, gtsam::Key & key, const bool use_to_init,
     const gtsam::NonlinearFactorGraph & one_step_factors);
   void handleImuMeasurement(const double ts);
+  void handleImuPropagation(
+    const double ts, const gtsam::NavState & nav_state, const State & propagation_base_state);
   void defineNoLock(
     const gtsam::NonlinearFactorGraph & graph, gtsam::Values & optimized_values,
     const DeclarationResult result);
   std::vector<double> getSmootherTimestampsNoLock();
   void updateStateToKeyTs(const gtsam::Key key, const double ts);
+  void publishStateEstimate(const gtsam::NavState & nav_state, const double ts);
   void publishResults();
   inline gtsam::Key getNextKey() { return internal_key_++; }
   inline void discardCurrentKey() { internal_key_--; }

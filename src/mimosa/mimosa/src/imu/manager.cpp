@@ -137,19 +137,21 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
   if (!propagate) return;
 
   gtsam::NavState nav_state;
+  State propagation_base_state;
   logger_->trace("Propagating IMU");
-  std::lock_guard<std::mutex> lock(propagation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(propagation_mutex_);
 
-  const double dt = it_current->first - propagated_upto_ts_;
+    const double dt = it_current->first - propagated_upto_ts_;
 
-  if (dt < 0) {
+    if (dt < 0) {
     // The current imu measurement is older than the last propagated state
     logger_->warn(
       "Current IMU measurement is older than the last propagated state. Current ts: {} "
       "Propagated ts: {}",
       it_current->first, propagated_upto_ts_);
     return;
-  } else if (dt == 0) {
+    } else if (dt == 0) {
     // This can happen if an IMU measurement shares an exact timestamp with a sensor measurement
     // that just updated the propagation base state, since they share the same hardware clock.
     // Nothing to integrate, so just publish the propagated state.
@@ -159,25 +161,27 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
       "Propagated ts: {}",
       it_current->first, propagated_upto_ts_);
     nav_state = propagation_base_state_.navState();
-  } else {  // Normal case where we need to integrate the new IMU measurement
-    if (propagated_upto_ts_ < it_previous->first) {
+    } else {  // Normal case where we need to integrate the new IMU measurement
+      if (propagated_upto_ts_ < it_previous->first) {
       // Normally we will always be doing 1 step propagation, but if we have missed some imu
       // measurements, we need to propagate up to the current imu measurement
-      updatePreintegrationTo(
-        propagation_base_state_.ts(), it_previous->first, propagation_base_state_.imuBias(),
-        propagation_preintegrator_);
-      propagated_upto_ts_ = it_previous->first;
-    }
+        updatePreintegrationTo(
+          propagation_base_state_.ts(), it_previous->first, propagation_base_state_.imuBias(),
+          propagation_preintegrator_);
+        propagated_upto_ts_ = it_previous->first;
+      }
 
     // Update the preintegrator with the previous imu measurement for the dt
-    propagation_preintegrator_->integrateMeasurement(
-      it_previous->second.head<3>(), it_previous->second.tail<3>(), dt);
-    propagated_upto_ts_ = it_current->first;
+      propagation_preintegrator_->integrateMeasurement(
+        it_previous->second.head<3>(), it_previous->second.tail<3>(), dt);
+      propagated_upto_ts_ = it_current->first;
 
     // Predict the state
-    nav_state = propagation_preintegrator_->predict(
-      propagation_base_state_.navState(), propagation_base_state_.imuBias(),
-      propagation_base_state_.gravity());
+      nav_state = propagation_preintegrator_->predict(
+        propagation_base_state_.navState(), propagation_base_state_.imuBias(),
+        propagation_base_state_.gravity());
+    }
+    propagation_base_state = propagation_base_state_;
   }
 
   // Publish propagated odometry
@@ -189,6 +193,12 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     convert(nav_state.pose(), odometry.pose.pose);
     convert(nav_state.velocity(), odometry.twist.twist.linear);
     pub_odometry_->publish(odometry);
+  }
+
+  // Do not hold propagation_mutex_ while invoking the graph manager. Graph correction resets the
+  // propagation base while holding its own mutex, so doing so would invert the lock order.
+  if (propagation_callback_) {
+    propagation_callback_(ts, nav_state, propagation_base_state);
   }
 }
 
@@ -601,7 +611,7 @@ void Manager::setPropagationBaseState(const State & state)
   logger_->trace("Setting propagation base state");
 
   std::lock_guard<std::mutex> lock(propagation_mutex_);
-  if (state.ts() > propagation_base_state_.ts()) {
+  if (state.ts() >= propagation_base_state_.ts()) {
     propagation_base_state_ = state;
     propagation_preintegrator_->resetIntegrationAndSetBias(propagation_base_state_.imuBias());
     propagated_upto_ts_ = propagation_base_state_.ts();

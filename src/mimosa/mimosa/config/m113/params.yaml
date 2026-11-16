@@ -35,8 +35,6 @@ graph:
   manager:
     log_level: warn
     max_measurement_latency: 0.25 # seconds # measurements that are older than this (wrt the latest state in the lag) will be discarded. Should be approximately half the lag time.
-    imu_only_timeout: 0.1 # seconds without an exteroceptive measurement before an IMU-only graph update
-    imu_only_update_rate_hz: 0 # Hz; 0 updates on every IMU message in IMU-only mode
     smoother:
       lag: 0.5 # seconds
       wildfire_threshold: 0.001
@@ -69,7 +67,7 @@ lidar:
   T_B_OdometryLoggerFrame: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
   manager:
     log_level: warn
-    enabled: false
+    enabled: true
     use_to_init: true
     reliable_qos: true
     initial_skip: 2 # number of initial pointclouds to drop

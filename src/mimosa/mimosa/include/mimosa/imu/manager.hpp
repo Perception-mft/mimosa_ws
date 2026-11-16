@@ -110,6 +110,7 @@ private:
   double propagated_upto_ts_ = 0;
   std::mutex propagation_mutex_;
   std::function<void(double)> measurement_callback_;
+  std::function<void(double, const gtsam::NavState &, const State &)> propagation_callback_;
 
   // Outputs
   rclcpp::Publisher<mimosa_msgs::msg::ImuManagerDebug>::SharedPtr pub_debug_;
@@ -143,6 +144,11 @@ public:
   inline void setMeasurementCallback(std::function<void(double)> callback)
   {
     measurement_callback_ = std::move(callback);
+  }
+  inline void setPropagationCallback(
+    std::function<void(double, const gtsam::NavState &, const State &)> callback)
+  {
+    propagation_callback_ = std::move(callback);
   }
   bool estimateAttitude(gtsam::Rot3 & R_W_B, V3D & estimated_acc_bias, V3D & estimated_gyro_bias);
   void getInterpolatedMeasurements(

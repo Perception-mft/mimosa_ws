@@ -44,23 +44,25 @@ Manager::Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager)
   pub_optimized_path_ = pnh.create_publisher<nav_msgs::msg::Path>("graph/optimized_path", 1);
 
   imu_manager_->setMeasurementCallback([this](const double ts) { handleImuMeasurement(ts); });
+  imu_manager_->setPropagationCallback(
+    [this](const double ts, const gtsam::NavState & nav_state, const State & base_state) {
+      handleImuPropagation(ts, nav_state, base_state);
+    });
 }
 
-Manager::~Manager() { imu_manager_->setMeasurementCallback({}); }
+Manager::~Manager()
+{
+  imu_manager_->setMeasurementCallback({});
+  imu_manager_->setPropagationCallback({});
+}
 
 void Manager::setImuOnlyMode(const bool enabled)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
   imu_only_mode_ = enabled;
-  if (!enabled) {
-    logger_->info("IMU-only mode disabled. Graph updates use the configured sensor timeout");
-  } else if (config_.imu_only_update_rate_hz == 0.0) {
-    logger_->info("IMU-only mode enabled. Graph updates run on every accepted IMU measurement");
-  } else {
-    logger_->info(
-      "IMU-only mode enabled. Graph updates are limited to {} Hz",
-      config_.imu_only_update_rate_hz);
-  }
+  logger_->info(
+    "IMU-only mode {}. IMU samples are propagated without running graph optimization",
+    enabled ? "enabled" : "disabled");
 }
 
 gtsam::ISAM2Params Manager::getISAM2Params() const
@@ -161,7 +163,6 @@ Manager::DeclarationResult Manager::declare(
   const gtsam::NonlinearFactorGraph & one_step_factors)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
-  last_exteroceptive_ts_ = std::max(last_exteroceptive_ts_, ts);
   return declareNoLock(ts, key, use_to_init, one_step_factors);
 }
 
@@ -529,46 +530,40 @@ Manager::DeclarationResult Manager::declareNoLock(
 
 void Manager::handleImuMeasurement(const double ts)
 {
-  if (!imu_only_mode_ && config_.imu_only_timeout <= 0.0) return;
+  // With no correction sensor, use the IMU stream only to establish the initial anchor. Every
+  // later sample is a cheap preintegration prediction handled by handleImuPropagation().
+  if (!imu_only_mode_) return;
 
   std::lock_guard<std::mutex> lock(graph_mutex_);
-
-  if (first_imu_ts_ == 0.0) {
-    first_imu_ts_ = ts;
-    return;
-  }
-
-  const double last_update_ts =
-    std::max({first_imu_ts_, last_exteroceptive_ts_, last_imu_only_update_ts_});
-  if (imu_only_mode_) {
-    if (
-      config_.imu_only_update_rate_hz > 0.0 &&
-      ts - last_update_ts < 1.0 / config_.imu_only_update_rate_hz) {
-      return;
-    }
-  } else if (ts - last_update_ts < config_.imu_only_timeout) {
-    return;
-  }
+  if (initialized_) return;
 
   gtsam::Key key;
   const auto result = declareNoLock(ts, key, true, {});
+  if (result == DeclarationResult::SUCCESS_INITIALIZED) {
+    imu_manager_->setPropagationBaseState(state_);
+    logger_->debug("Initialized IMU-only propagation at ts {}", ts);
+  }
+}
+
+void Manager::handleImuPropagation(
+  const double ts, const gtsam::NavState & nav_state, const State & propagation_base_state)
+{
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+  if (!initialized_) return;
+
+  // A correction may have replaced the propagation anchor after this prediction was calculated.
+  // Drop that stale result rather than publishing it after the corrected output.
   if (
-    result != DeclarationResult::SUCCESS_INITIALIZED &&
-    result != DeclarationResult::SUCCESS_NORMAL) {
+    propagation_base_state.key() != state_.key() ||
+    propagation_base_state.ts() != state_.ts() ||
+    !propagation_base_state.navState().equals(state_.navState(), 1.0e-9) ||
+    !propagation_base_state.imuBias().equals(state_.imuBias(), 1.0e-9) ||
+    !propagation_base_state.gravity().equals(state_.gravity(), 1.0e-9)) {
+    logger_->trace("Dropping stale IMU prediction at ts {}", ts);
     return;
   }
 
-  last_imu_only_update_ts_ = ts;
-  imu_manager_->setPropagationBaseState(state_);
-
-  // initializeGraph() already publishes the initial state. Normal declarations with no
-  // exteroceptive factors deliberately do not publish, so publish the IMU-only update here.
-  if (result == DeclarationResult::SUCCESS_NORMAL) {
-    publishResults();
-  }
-  logger_->debug(
-    "IMU-only graph update at ts {} {}", ts,
-    imu_only_mode_ ? "for current IMU measurement" : "after sensor timeout");
+  publishStateEstimate(nav_state, ts);
 }
 
 void Manager::getCurrentState(State & state)
@@ -765,14 +760,50 @@ void Manager::initializeGraph(
   ts_key_map_[ts] = key;
 
   updateStateToKeyTs(key, ts);
+  imu_manager_->setPropagationBaseState(state_);
 
   publishResults();
 }
 
-void Manager::publishResults()
+void Manager::publishStateEstimate(const gtsam::NavState & nav_state, const double ts)
 {
   broadcastTransform(
-    tf2_broadcaster_, state_.navState().pose(), config_.map_frame, config_.body_frame, state_.ts());
+    tf2_broadcaster_, nav_state.pose(), config_.map_frame, config_.body_frame, ts);
+
+  static nav_msgs::msg::Path path;
+  path.header.frame_id = config_.map_frame;
+  publishPath(pub_path_, path, nav_state.pose(), ts);
+
+  // Write the exact published output to the trajectory logger.
+  const gtsam::Quaternion q = nav_state.pose().rotation().toQuaternion();
+  trajectory_logger_->info(
+    "{} {} {} {} {} {} {} {}", ts, nav_state.pose().translation().x(),
+    nav_state.pose().translation().y(), nav_state.pose().translation().z(), q.x(), q.y(), q.z(),
+    q.w());
+
+  static nav_msgs::msg::Odometry odometry;
+  if (pub_odometry_->get_subscription_count()) {
+    odometry.header.frame_id = config_.map_frame;
+    odometry.child_frame_id = config_.body_frame;
+    odometry.header.stamp = toStamp(ts);
+    convert(nav_state.pose(), odometry.pose.pose);
+    convert(nav_state.velocity(), odometry.twist.twist.linear);
+    pub_odometry_->publish(odometry);
+  }
+
+  static geometry_msgs::msg::TransformStamped ts_frame_child;
+  if (pub_transform_stamped_->get_subscription_count()) {
+    ts_frame_child.header.frame_id = config_.map_frame;
+    ts_frame_child.child_frame_id = config_.body_frame;
+    ts_frame_child.header.stamp = toStamp(ts);
+    convert(nav_state.pose(), ts_frame_child.transform);
+    pub_transform_stamped_->publish(ts_frame_child);
+  }
+}
+
+void Manager::publishResults()
+{
+  publishStateEstimate(state_.navState(), state_.ts());
 
   // Broadcast the nav to map transform
   const V3D configured_gravity = imu_manager_->config().preintegration.gravity;
@@ -787,39 +818,6 @@ void Manager::publishResults()
   }
   broadcastTransform(
     tf2_static_broadcaster_, T_N_W, config_.navigation_frame, config_.map_frame, 0.0);
-
-  static nav_msgs::msg::Path path;
-  path.header.frame_id = config_.map_frame;
-  publishPath(pub_path_, path, state_.navState().pose(), state_.ts());
-
-  // Write the trajectory to the trajectory logger
-  // timestamp tx ty tz qx qy qz qw
-  const gtsam::Quaternion q = state_.navState().pose().rotation().toQuaternion();
-  trajectory_logger_->info(
-    "{} {} {} {} {} {} {} {}", state_.ts(), state_.navState().pose().translation().x(),
-    state_.navState().pose().translation().y(), state_.navState().pose().translation().z(), q.x(),
-    q.y(), q.z(), q.w());
-
-  // Publish odometry
-  static nav_msgs::msg::Odometry odometry;
-  if (pub_odometry_->get_subscription_count()) {
-    odometry.header.frame_id = config_.map_frame;
-    odometry.child_frame_id = config_.body_frame;
-    odometry.header.stamp = toStamp(state_.ts());
-    convert(state_.navState().pose(), odometry.pose.pose);
-    convert(state_.navState().velocity(), odometry.twist.twist.linear);
-    pub_odometry_->publish(odometry);
-  }
-
-  // Publish transform stamped
-  static geometry_msgs::msg::TransformStamped ts_frame_child;
-  if (pub_transform_stamped_->get_subscription_count()) {
-    ts_frame_child.header.frame_id = config_.map_frame;
-    ts_frame_child.child_frame_id = config_.body_frame;
-    ts_frame_child.header.stamp = toStamp(state_.ts());
-    convert(state_.navState().pose(), ts_frame_child.transform);
-    pub_transform_stamped_->publish(ts_frame_child);
-  }
 
   // Publish debug message
   debug_msg_.header.stamp = toStamp(state_.ts());

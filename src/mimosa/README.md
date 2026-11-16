@@ -9,7 +9,7 @@ This package implements a tightly-coupled multi-modal fusion framework. It curre
 
 ## Working Description
 
-mimosa maintains a sliding window factor graph to fuse factors generated from multiple sensors. On arrival of a new measurement (a pointcloud from the LiDAR or Radar or an odometry message from an external odometry source like VIO), a new state is "declared" in the graph and connected with a preintegrated IMU factor. Then the measurement gets processed by the corresponding sensor manager to generate a new factor(s). This factor(s) is(are) then added to the graph and the graph is optimized. The optimized state is then published on `mimosa_node/graph/odometry` topic as a `nav_msgs/Odometry` message.
+mimosa maintains a sliding window factor graph to fuse factors generated from multiple sensors. On arrival of a new measurement (a pointcloud from the LiDAR or Radar or an odometry message from an external odometry source like VIO), a new state is "declared" in the graph and connected with a preintegrated IMU factor. Then the measurement gets processed by the corresponding sensor manager to generate a new factor(s). This factor(s) is(are) then added to the graph and the graph is optimized. Between these corrections, every accepted IMU sample predicts forward from the latest optimized state without updating the factor graph. Both the IMU-rate predictions and corrected states are published on `mimosa_node/graph/odometry` as `nav_msgs/Odometry` messages.
 
 ### IMU Factor
 
