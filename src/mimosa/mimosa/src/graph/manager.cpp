@@ -42,6 +42,27 @@ Manager::Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager)
   pub_odometry_ = pnh.create_publisher<nav_msgs::msg::Odometry>("graph/odometry", 1);
   pub_transform_stamped_ = pnh.create_publisher<geometry_msgs::msg::TransformStamped>("graph/transform", 1);
   pub_optimized_path_ = pnh.create_publisher<nav_msgs::msg::Path>("graph/optimized_path", 1);
+
+  imu_manager_->setMeasurementCallback([this](const double ts) { handleImuMeasurement(ts); });
+  imu_manager_->setPropagationCallback(
+    [this](const double ts, const gtsam::NavState & nav_state, const State & base_state) {
+      handleImuPropagation(ts, nav_state, base_state);
+    });
+}
+
+Manager::~Manager()
+{
+  imu_manager_->setMeasurementCallback({});
+  imu_manager_->setPropagationCallback({});
+}
+
+void Manager::setImuOnlyMode(const bool enabled)
+{
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+  imu_only_mode_ = enabled;
+  logger_->info(
+    "IMU-only mode {}. IMU samples are propagated without running graph optimization",
+    enabled ? "enabled" : "disabled");
 }
 
 gtsam::ISAM2Params Manager::getISAM2Params() const
@@ -142,6 +163,13 @@ Manager::DeclarationResult Manager::declare(
   const gtsam::NonlinearFactorGraph & one_step_factors)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
+  return declareNoLock(ts, key, use_to_init, one_step_factors);
+}
+
+Manager::DeclarationResult Manager::declareNoLock(
+  const double ts, gtsam::Key & key, const bool use_to_init,
+  const gtsam::NonlinearFactorGraph & one_step_factors)
+{
 
   key = getNextKey();
 
@@ -500,6 +528,44 @@ Manager::DeclarationResult Manager::declare(
   return Manager::DeclarationResult::SUCCESS_NORMAL;
 }
 
+void Manager::handleImuMeasurement(const double ts)
+{
+  // With no correction sensor, use the IMU stream only to establish the initial anchor. Every
+  // later sample is a cheap preintegration prediction handled by handleImuPropagation().
+  if (!imu_only_mode_) return;
+
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+  if (initialized_) return;
+
+  gtsam::Key key;
+  const auto result = declareNoLock(ts, key, true, {});
+  if (result == DeclarationResult::SUCCESS_INITIALIZED) {
+    imu_manager_->setPropagationBaseState(state_);
+    logger_->debug("Initialized IMU-only propagation at ts {}", ts);
+  }
+}
+
+void Manager::handleImuPropagation(
+  const double ts, const gtsam::NavState & nav_state, const State & propagation_base_state)
+{
+  std::lock_guard<std::mutex> lock(graph_mutex_);
+  if (!initialized_) return;
+
+  // A correction may have replaced the propagation anchor after this prediction was calculated.
+  // Drop that stale result rather than publishing it after the corrected output.
+  if (
+    propagation_base_state.key() != state_.key() ||
+    propagation_base_state.ts() != state_.ts() ||
+    !propagation_base_state.navState().equals(state_.navState(), 1.0e-9) ||
+    !propagation_base_state.imuBias().equals(state_.imuBias(), 1.0e-9) ||
+    !propagation_base_state.gravity().equals(state_.gravity(), 1.0e-9)) {
+    logger_->trace("Dropping stale IMU prediction at ts {}", ts);
+    return;
+  }
+
+  publishStateEstimate(nav_state, ts);
+}
+
 void Manager::getCurrentState(State & state)
 {
   std::lock_guard<std::mutex> lock(graph_mutex_);
@@ -658,8 +724,11 @@ void Manager::initializeGraph(
   const auto prior_noise_gravity =
     gtsam::noiseModel::Isotropic::Sigma(2, config_.smoother.initial_gravity_sigma);  // m/s^2
 
-  const gtsam::Unit3 n_gravity_direction =
-    gtsam::Unit3(imu_manager_->getPreintegratorParams()->getGravity());
+  const V3D gravity = imu_manager_->getPreintegratorParams()->getGravity();
+  // Gravity is represented in the graph by a direction and a separately configured magnitude.
+  // Its direction is immaterial when that magnitude is zero, but Unit3 still needs a valid vector.
+  const V3D gravity_direction = gravity.squaredNorm() > 0.0 ? gravity : V3D(0.0, 0.0, 1.0);
+  const gtsam::Unit3 n_gravity_direction(gravity_direction);
 
   gtsam::NonlinearFactorGraph graph;
   graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(key), T_W_B, prior_noise_pose);
@@ -691,63 +760,71 @@ void Manager::initializeGraph(
   ts_key_map_[ts] = key;
 
   updateStateToKeyTs(key, ts);
+  imu_manager_->setPropagationBaseState(state_);
 
   publishResults();
 }
 
-void Manager::publishResults()
+void Manager::publishStateEstimate(const gtsam::NavState & nav_state, const double ts)
 {
   broadcastTransform(
-    tf2_broadcaster_, state_.navState().pose(), config_.map_frame, config_.body_frame, state_.ts());
-
-  // Broadcast the nav to map transform
-  const V3D n_g_direction = -V3D::UnitZ();
-  V3D w_g_direction = state_.gravity().unitVector();
-  // n_g = T_N_W * w_g
-  gtsam::Pose3 T_N_W = gtsam::Pose3(
-    gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(w_g_direction, n_g_direction)), V3D::Zero());
-  broadcastTransform(
-    tf2_static_broadcaster_, T_N_W, config_.navigation_frame, config_.map_frame, 0.0);
+    tf2_broadcaster_, nav_state.pose(), config_.map_frame, config_.body_frame, ts);
 
   static nav_msgs::msg::Path path;
   path.header.frame_id = config_.map_frame;
-  publishPath(pub_path_, path, state_.navState().pose(), state_.ts());
+  publishPath(pub_path_, path, nav_state.pose(), ts);
 
-  // Write the trajectory to the trajectory logger
-  // timestamp tx ty tz qx qy qz qw
-  const gtsam::Quaternion q = state_.navState().pose().rotation().toQuaternion();
+  // Write the exact published output to the trajectory logger.
+  const gtsam::Quaternion q = nav_state.pose().rotation().toQuaternion();
   trajectory_logger_->info(
-    "{} {} {} {} {} {} {} {}", state_.ts(), state_.navState().pose().translation().x(),
-    state_.navState().pose().translation().y(), state_.navState().pose().translation().z(), q.x(),
-    q.y(), q.z(), q.w());
+    "{} {} {} {} {} {} {} {}", ts, nav_state.pose().translation().x(),
+    nav_state.pose().translation().y(), nav_state.pose().translation().z(), q.x(), q.y(), q.z(),
+    q.w());
 
-  // Publish odometry
   static nav_msgs::msg::Odometry odometry;
   if (pub_odometry_->get_subscription_count()) {
     odometry.header.frame_id = config_.map_frame;
     odometry.child_frame_id = config_.body_frame;
-    odometry.header.stamp = toStamp(state_.ts());
-    convert(state_.navState().pose(), odometry.pose.pose);
-    convert(state_.navState().velocity(), odometry.twist.twist.linear);
+    odometry.header.stamp = toStamp(ts);
+    convert(nav_state.pose(), odometry.pose.pose);
+    convert(nav_state.velocity(), odometry.twist.twist.linear);
     pub_odometry_->publish(odometry);
   }
 
-  // Publish transform stamped
   static geometry_msgs::msg::TransformStamped ts_frame_child;
   if (pub_transform_stamped_->get_subscription_count()) {
     ts_frame_child.header.frame_id = config_.map_frame;
     ts_frame_child.child_frame_id = config_.body_frame;
-    ts_frame_child.header.stamp = toStamp(state_.ts());
-    convert(state_.navState().pose(), ts_frame_child.transform);
+    ts_frame_child.header.stamp = toStamp(ts);
+    convert(nav_state.pose(), ts_frame_child.transform);
     pub_transform_stamped_->publish(ts_frame_child);
   }
+}
+
+void Manager::publishResults()
+{
+  publishStateEstimate(state_.navState(), state_.ts());
+
+  // Broadcast the nav to map transform
+  const V3D configured_gravity = imu_manager_->config().preintegration.gravity;
+  gtsam::Pose3 T_N_W;
+  if (configured_gravity.squaredNorm() > 0.0) {
+    const V3D n_g_direction = configured_gravity.normalized();
+    const V3D w_g_direction = state_.gravity().unitVector();
+    // n_g = T_N_W * w_g
+    T_N_W = gtsam::Pose3(
+      gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(w_g_direction, n_g_direction)),
+      V3D::Zero());
+  }
+  broadcastTransform(
+    tf2_static_broadcaster_, T_N_W, config_.navigation_frame, config_.map_frame, 0.0);
 
   // Publish debug message
   debug_msg_.header.stamp = toStamp(state_.ts());
   convert(state_.imuBias().accelerometer(), debug_msg_.acc_bias);
   convert(state_.imuBias().gyroscope(), debug_msg_.gyro_bias);
   convert(
-    state_.gravity().unitVector() * imu_manager_->config().preintegration.gravity_magnitude,
+    state_.gravity().unitVector() * imu_manager_->config().preintegration.gravity.norm(),
     debug_msg_.gravity);
   pub_debug_->publish(debug_msg_);
 
@@ -834,9 +911,13 @@ void declare_config(ManagerConfig & config)
     NameSpace ns("graph/manager");
     field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
     field(config.max_measurement_latency, "max_measurement_latency", "s");
+    field(config.imu_only_timeout, "imu_only_timeout", "s");
+    field(config.imu_only_update_rate_hz, "imu_only_update_rate_hz", "Hz");
     field(config.smoother, "smoother");
   }
 
+  check(config.imu_only_timeout, GE, 0.0, "imu_only_timeout");
+  check(config.imu_only_update_rate_hz, GE, 0.0, "imu_only_update_rate_hz");
   check(config.body_frame, NE, config.map_frame, "body_frame");
 }
 

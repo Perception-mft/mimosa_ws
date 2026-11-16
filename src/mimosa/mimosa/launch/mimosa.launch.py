@@ -54,6 +54,9 @@ def _launch(context):
     with open(os.path.join(profile_dir, "params.yaml"), encoding="utf-8") as stream:
         params = _flatten(yaml.safe_load(stream))
 
+    with open(os.path.join(share, "model", "m113.urdf"), encoding="utf-8") as stream:
+        robot_description = stream.read()
+
     metadata_path = os.path.normpath(os.path.join(profile_dir, PROFILES[profile][4]))
     with open(metadata_path, encoding="utf-8") as stream:
         params.update(_flatten(json.load(stream), "lidar.sensor"))
@@ -93,6 +96,15 @@ def _launch(context):
             package="mimosa", executable="mimosa_node", name="mimosa_node",
             namespace="mimosa_node", output="screen", parameters=[params],
             remappings=remappings,
+        ),
+        Node(
+            package="robot_state_publisher", executable="robot_state_publisher",
+            name="mimosa_robot_state_publisher", output="screen",
+            parameters=[{
+                "robot_description": robot_description,
+                "use_sim_time": params["use_sim_time"],
+            }],
+            condition=IfCondition(LaunchConfiguration("viz")),
         ),
         Node(
             package="rviz2", executable="rviz2", name="rviz2",

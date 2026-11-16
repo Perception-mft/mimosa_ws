@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot name="m113_visual">
+
+  <link name="mimosa_body">
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 1.57079632679"/>
+
+      <geometry>
+        <mesh
+          filename="package://mimosa/model/m113.dae"
+          scale="1 1 1"/>
+      </geometry>
+    </visual>
+  </link>
+
+</robot>

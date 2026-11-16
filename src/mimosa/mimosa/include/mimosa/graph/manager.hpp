@@ -106,6 +106,7 @@ private:
   gtsam::Values optimized_values_;
   std::map<double, gtsam::Key> ts_key_map_;
   std::mutex graph_mutex_;
+  bool imu_only_mode_ = false;
   mimosa_msgs::msg::GraphManagerDebug debug_msg_;
 
   // Outputs
@@ -119,6 +120,8 @@ private:
 
 public:
   Manager(rclcpp::Node & pnh, mimosa::imu::Manager::Ptr imu_manager);
+  ~Manager();
+  void setImuOnlyMode(const bool enabled);
   // The one step factors are for things that do not require the two step process. Eg. Radar
   DeclarationResult declare(
     const double ts, gtsam::Key & key, const bool use_to_init,
@@ -161,11 +164,18 @@ private:
   void rekeyOneStepFactors(
     const gtsam::NonlinearFactorGraph & one_step_factors, const gtsam::Key new_key,
     gtsam::NonlinearFactorGraph & rekeyed_one_step_factors);
+  DeclarationResult declareNoLock(
+    const double ts, gtsam::Key & key, const bool use_to_init,
+    const gtsam::NonlinearFactorGraph & one_step_factors);
+  void handleImuMeasurement(const double ts);
+  void handleImuPropagation(
+    const double ts, const gtsam::NavState & nav_state, const State & propagation_base_state);
   void defineNoLock(
     const gtsam::NonlinearFactorGraph & graph, gtsam::Values & optimized_values,
     const DeclarationResult result);
   std::vector<double> getSmootherTimestampsNoLock();
   void updateStateToKeyTs(const gtsam::Key key, const double ts);
+  void publishStateEstimate(const gtsam::NavState & nav_state, const double ts);
   void publishResults();
   inline gtsam::Key getNextKey() { return internal_key_++; }
   inline void discardCurrentKey() { internal_key_--; }

@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug factor graph report (mimosa_move1_no_lidar)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/mimosa/mimosa/scripts/factor_graph_state_report.py",
+      "args": [
+        "/home/tal/git_repos/uas/src/mimosa/rosbags/mimosa_move1_no_lidar"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

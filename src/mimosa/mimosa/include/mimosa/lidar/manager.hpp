@@ -10,6 +10,7 @@
 #include "mimosa/lidar/geometric.hpp"
 #include "mimosa/lidar/photometric.hpp"
 #include "mimosa/sensor_manager_base.hpp"
+#include "mimosa_msgs/msg/factor_graph_state.hpp"
 #include "mimosa_msgs/msg/lidar_manager_debug.hpp"
 
 // pcl_conversions
@@ -72,6 +73,7 @@ private:
   // Outputs
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_points_;
   rclcpp::Publisher<mimosa_msgs::msg::LidarManagerDebug>::SharedPtr pub_debug_;
+  rclcpp::Publisher<mimosa_msgs::msg::FactorGraphState>::SharedPtr pub_factor_graph_state_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
 
 public:

@@ -3,6 +3,15 @@
 /install/
 /build/
 
+# Local Python environment
+/.venv/
+
+# ROS 2 bag recordings
+/rosbags/
+/rosbag2_*/
+*.db3
+*.mcap
+
 # Consolidated from src/config_utilities/.gitignore
 /src/config_utilities/**/devel/
 /src/config_utilities/**/logs/

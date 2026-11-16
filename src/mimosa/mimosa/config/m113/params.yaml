@@ -7,22 +7,29 @@ imu:
   manager:
     log_level: warn
     ts_offset: 0
-    max_buffer_duration: 4
-    pose_init_wait_secs: 1
+    reliable_qos: true
+    max_buffer_duration: 30
+    pose_init_wait_secs: 5
+    pose_init_max_acc_std: 0.2 # [m/s^2] maximum RMS acceleration variation during initialization
+    pose_init_max_gyro_std: 0.02 # [rad/s] maximum RMS angular-rate variation during initialization
+    pose_init_max_gyro_mean: 0.05 # [rad/s] maximum mean angular rate during initialization
+    pose_init_max_gravity_error: 1.0 # [m/s^2] allowed difference between mean acceleration magnitude and gravity
     interpolation_max_ts_diff: 1 #s
     extrapolation_max_ts_diff: 0.15 #s
     acc_scale_factor: 1 # Scales the accelerometer measurement. Default is 1, which means no scaling. Livox typically reports acc in g, so we need to scale it to m/s^2
-    max_acceleration_magnitude: 50 # [m/s^2] Drop acceleration spikes that are not physically plausible for the UGV
+    max_acceleration_magnitude: 100 # [m/s^2] Drop acceleration spikes that are not physically plausible for the UGV
+    initial_yaw: simulation # configuration uses initial_yaw_deg; simulation uses the latest valid IMU orientation at initialization
+    initial_yaw_deg: 0.0
   preintegration:
     acc_noise_density: 0.13886655606357616 # 0.013886655606357616  # [ m / s^2 / sqrt(Hz) ]   ( accel "white noise" ) # Vectornav VN-100 0.0013886655606357616
     acc_bias_random_walk: 8.538212723310593e-05 # [ m / s^3 / sqrt(Hz) ].  ( accel bias diffusion ) # Vectornav VN-100 8.538212723310593e-05
     gyro_noise_density: 5.4380545102010436e-03 # 5.4380545102010436e-04 # [ rad / s / sqrt(Hz) ]   ( gyro "white noise" ) # Vectornav VN-100 5.4380545102010436e-05
     gyro_bias_random_walk: 1.6587925152480572e-06 # [ rad / s^2 / sqrt(Hz) ] ( gyro bias diffusion ) # Vectornav VN-100 1.6587925152480572e-06
-    integration_sigma: 0 # Unclear what this is. Set to 0 for now.
+    integration_sigma: 1.0e-4 # Numerical uncertainty from integrating position from velocity
     use_2nd_order_coriolis: false
     use_estimated_gravity: false
-    gravity_magnitude: 9.81
-    gravity_aligned_initialization: false
+    gravity: [0.0, 0.0, -9.81000062] # [m/s^2] Gravity vector in the navigation frame
+    gravity_aligned_initialization: true
 
 graph:
   manager:
@@ -40,13 +47,13 @@ graph:
       relinearize_skip: 1
       enable_relinearization: true
       evaluate_nonlinear_error: false
-      factorization: CHOLESKY
+      factorization: QR
       cache_linearized_factors: true
       enable_detailed_results: false
       enable_partial_relinearization_check: true
       initial_position_sigma: 1.0e-6
       initial_rotation_yaw_sigma_deg: 1.0e-6
-      initial_rotation_pitch_roll_sigma_deg: 1.0e-6 # 10.0 # if gravity_aligned_initialization is true, then this should be set to 10.0
+      initial_rotation_pitch_roll_sigma_deg: 10.0 # 10.0 # if gravity_aligned_initialization is true, then this should be set to 10.0
       initial_velocity_sigma: 1.0e-6
       initial_bias_acc_sigma: 1.0e-1
       initial_bias_gyro_sigma: 1.0e-5
@@ -56,12 +63,13 @@ graph:
 
 lidar:
   sensor_frame: mimosa_lidar
-  T_B_S: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,] # x, y, z, x, y, z, w
-  T_B_OdometryLoggerFrame: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
+  T_B_S: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
+  T_B_OdometryLoggerFrame: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
   manager:
     log_level: warn
     enabled: true
     use_to_init: true
+    reliable_qos: true
     initial_skip: 2 # number of initial pointclouds to drop
     transpose_pointcloud: false # Transpose the pointcloud to have height correspond to the number of rings and width correspond to the number of points per ring
     organize_pointcloud_by_ring: true # Only needed if the pointcloud is not already provided in a row major order by ring (Currently only required for Hesai JT128)
@@ -88,13 +96,13 @@ lidar:
     neighbor_voxel_mode: 19
     scan_to_map:
       source_voxel_grid_filter_leaf_size: 1
-      source_voxel_grid_min_dist_in_voxel: 0.2
+      source_voxel_grid_min_dist_in_voxel: 0.1
       target_ivox_map_leaf_size: 1
-      target_ivox_map_min_dist_in_voxel: 0.2
+      target_ivox_map_min_dist_in_voxel: 0.1
       num_corres_points: 5
       max_corres_distance: 1
-      plane_validity_distance: 0.07
-      lidar_point_noise_std_dev: 0.07
+      plane_validity_distance: 0.000007
+      lidar_point_noise_std_dev: 0.00007
       use_huber: true
       huber_threshold: 1.345
       reg_4_dof: false
@@ -146,6 +154,7 @@ radar:
     log_level: warn
     use_to_init: false
     enabled: false
+    reliable_qos: false
     initial_skip: 2 # number of initial pointclouds to drop
     ts_offset: 0
     is_exposure_compensated: false # If false, then the timestamp will be shifted by frame_ms/2
@@ -162,8 +171,9 @@ odometry:
   T_B_S: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:
     log_level: warn
-    enabled: true
+    enabled: false
     use_to_init: false
+    reliable_qos: false
     initial_skip: 2 # number of initial messages to drop
     ts_offset: 0
     d_opt_thresh: 1

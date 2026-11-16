@@ -20,6 +20,8 @@ Manager::Manager(rclcpp::Node & pnh)
 
   // Publishers
   pub_debug_ = pnh.create_publisher<mimosa_msgs::msg::ImuManagerDebug>("imu/manager/debug", 1);
+  pub_factor_graph_state_ =
+    pnh.create_publisher<mimosa_msgs::msg::FactorGraphState>("/debug/imu/state", 10);
   pub_localizability_marker_array_ =
     pnh.create_publisher<visualization_msgs::msg::MarkerArray>("imu/manager/localizability_marker_array", 1);
   pub_odometry_ = pnh.create_publisher<nav_msgs::msg::Odometry>("imu/manager/odometry", 1);
@@ -28,9 +30,14 @@ Manager::Manager(rclcpp::Node & pnh)
   callback_group_ = pnh.create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   rclcpp::SubscriptionOptions options;
   options.callback_group = callback_group_;
+  auto qos = rclcpp::SensorDataQoS().keep_last(1000);
+  if (config_.reliable_qos) {
+    qos.reliable();
+  }
   sub_ = pnh.create_subscription<sensor_msgs::msg::Imu>(
-    "imu/manager/imu_in", rclcpp::SensorDataQoS().keep_last(1000),
+    "imu/manager/imu_in", qos,
     [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { callback(msg); }, options);
+
 }
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams(
@@ -57,7 +64,7 @@ std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParam
 
 std::shared_ptr<gtsam::PreintegrationParams> Manager::generatePreintegratorParams() const
 {
-  return generatePreintegratorParams(V3D(0, 0, -config_.preintegration.gravity_magnitude));
+  return generatePreintegratorParams(config_.preintegration.gravity);
 }
 
 void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
@@ -98,6 +105,12 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     has_recieved_first_message_ = true;
   }
 
+  // Keep the yaw synchronized with the accepted IMU sample. Using a second subscription and
+  // latching its first message made initialization depend on DDS callback/startup ordering.
+  if (config_.initial_yaw == InitialYawSource::SIMULATION) {
+    initialYawCallback(msg);
+  }
+
   // Add to buffer
   ImuBuffer::const_iterator it_current, it_previous;
   bool propagate = false;
@@ -117,22 +130,28 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     }
   }
 
+  if (measurement_callback_) {
+    measurement_callback_(ts);
+  }
+
   if (!propagate) return;
 
   gtsam::NavState nav_state;
+  State propagation_base_state;
   logger_->trace("Propagating IMU");
-  std::lock_guard<std::mutex> lock(propagation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(propagation_mutex_);
 
-  const double dt = it_current->first - propagated_upto_ts_;
+    const double dt = it_current->first - propagated_upto_ts_;
 
-  if (dt < 0) {
+    if (dt < 0) {
     // The current imu measurement is older than the last propagated state
     logger_->warn(
       "Current IMU measurement is older than the last propagated state. Current ts: {} "
       "Propagated ts: {}",
       it_current->first, propagated_upto_ts_);
     return;
-  } else if (dt == 0) {
+    } else if (dt == 0) {
     // This can happen if an IMU measurement shares an exact timestamp with a sensor measurement
     // that just updated the propagation base state, since they share the same hardware clock.
     // Nothing to integrate, so just publish the propagated state.
@@ -142,25 +161,27 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
       "Propagated ts: {}",
       it_current->first, propagated_upto_ts_);
     nav_state = propagation_base_state_.navState();
-  } else {  // Normal case where we need to integrate the new IMU measurement
-    if (propagated_upto_ts_ < it_previous->first) {
+    } else {  // Normal case where we need to integrate the new IMU measurement
+      if (propagated_upto_ts_ < it_previous->first) {
       // Normally we will always be doing 1 step propagation, but if we have missed some imu
       // measurements, we need to propagate up to the current imu measurement
-      updatePreintegrationTo(
-        propagation_base_state_.ts(), it_previous->first, propagation_base_state_.imuBias(),
-        propagation_preintegrator_);
-      propagated_upto_ts_ = it_previous->first;
-    }
+        updatePreintegrationTo(
+          propagation_base_state_.ts(), it_previous->first, propagation_base_state_.imuBias(),
+          propagation_preintegrator_);
+        propagated_upto_ts_ = it_previous->first;
+      }
 
     // Update the preintegrator with the previous imu measurement for the dt
-    propagation_preintegrator_->integrateMeasurement(
-      it_previous->second.head<3>(), it_previous->second.tail<3>(), dt);
-    propagated_upto_ts_ = it_current->first;
+      propagation_preintegrator_->integrateMeasurement(
+        it_previous->second.head<3>(), it_previous->second.tail<3>(), dt);
+      propagated_upto_ts_ = it_current->first;
 
     // Predict the state
-    nav_state = propagation_preintegrator_->predict(
-      propagation_base_state_.navState(), propagation_base_state_.imuBias(),
-      propagation_base_state_.gravity());
+      nav_state = propagation_preintegrator_->predict(
+        propagation_base_state_.navState(), propagation_base_state_.imuBias(),
+        propagation_base_state_.gravity());
+    }
+    propagation_base_state = propagation_base_state_;
   }
 
   // Publish propagated odometry
@@ -173,6 +194,27 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     convert(nav_state.velocity(), odometry.twist.twist.linear);
     pub_odometry_->publish(odometry);
   }
+
+  // Do not hold propagation_mutex_ while invoking the graph manager. Graph correction resets the
+  // propagation base while holding its own mutex, so doing so would invert the lock order.
+  if (propagation_callback_) {
+    propagation_callback_(ts, nav_state, propagation_base_state);
+  }
+}
+
+void Manager::initialYawCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
+{
+  const auto & q_msg = msg->orientation;
+  const Eigen::Quaterniond q(q_msg.w, q_msg.x, q_msg.y, q_msg.z);
+  if (
+    msg->orientation_covariance[0] == -1.0 || !q.coeffs().allFinite() ||
+    q.squaredNorm() <= 1.0e-12) {
+    logger_->warn("Ignoring invalid orientation from configured IMU input");
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  orientation_yaw_ = gtsam::Rot3(q.normalized()).ypr()(0);
 }
 
 bool Manager::estimateAttitude(
@@ -180,6 +222,7 @@ bool Manager::estimateAttitude(
 {
   size_t buffer_size = 0;
   V3D acc_mean(0.0, 0.0, 0.0), gyro_mean(0.0, 0.0, 0.0);
+  std::optional<double> initial_yaw;
   {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     if (buffer_.empty()) {
@@ -194,45 +237,96 @@ bool Manager::estimateAttitude(
       return false;
     }
 
-    // Accumulate all the measurements
-    for (const auto & itr : buffer_) {
-      acc_mean += itr.second.head<3>();
-      gyro_mean += itr.second.tail<3>();
+    // Use only the most recent initialization window. If an earlier window contained simulator
+    // startup transients or motion, those samples can age out and initialization can recover.
+    const double window_start_ts = buffer_.rbegin()->first - config_.pose_init_wait_secs;
+    auto window_begin = std::lower_bound(
+      buffer_.begin(), buffer_.end(), window_start_ts,
+      [](const ImuMeasurement & measurement, const double ts) { return measurement.first < ts; });
+
+    for (auto itr = window_begin; itr != buffer_.end(); ++itr) {
+      acc_mean += itr->second.head<3>();
+      gyro_mean += itr->second.tail<3>();
     }
-    buffer_size = buffer_.size();
+    buffer_size = std::distance(window_begin, buffer_.end());
+    initial_yaw = orientation_yaw_;
+
+    acc_mean /= buffer_size;
+    gyro_mean /= buffer_size;
+
+    double acc_squared_error = 0.0;
+    double gyro_squared_error = 0.0;
+    for (auto itr = window_begin; itr != buffer_.end(); ++itr) {
+      acc_squared_error += (itr->second.head<3>() - acc_mean).squaredNorm();
+      gyro_squared_error += (itr->second.tail<3>() - gyro_mean).squaredNorm();
+    }
+    const double acc_std = std::sqrt(acc_squared_error / buffer_size);
+    const double gyro_std = std::sqrt(gyro_squared_error / buffer_size);
+    const double gravity_error =
+      std::abs(acc_mean.norm() - config_.preintegration.gravity.norm());
+    if (
+      acc_std > config_.pose_init_max_acc_std ||
+      gyro_std > config_.pose_init_max_gyro_std ||
+      gyro_mean.norm() > config_.pose_init_max_gyro_mean ||
+      gravity_error > config_.pose_init_max_gravity_error) {
+      logger_->debug(
+        "IMU initialization window is not stationary: acc_std={} m/s^2, gyro_std={} rad/s, "
+        "gyro_mean={} rad/s, gravity_error={} m/s^2",
+        acc_std, gyro_std, gyro_mean.norm(), gravity_error);
+      return false;
+    }
   }
 
-  // Average IMU measurements
-  acc_mean /= buffer_size;
-  gyro_mean /= buffer_size;
+  if (config_.initial_yaw == InitialYawSource::CONFIGURATION) {
+    initial_yaw = deg2rad(config_.initial_yaw_deg);
+  } else if (!initial_yaw) {
+    logger_->warn(
+      "Cannot initialize yaw: no valid orientation has been received on the configured IMU input");
+    return false;
+  }
 
   // Set the gyro bias - this assumes that we are stationary
   estimated_gyro_bias = gyro_mean;
 
-  if (config_.preintegration.gravity_aligned_initialization) {
-    const V3D gravity_W = V3D(0.0, 0.0, config_.preintegration.gravity_magnitude);
+  const double gravity_norm = config_.preintegration.gravity.norm();
+  if (config_.preintegration.gravity_aligned_initialization && gravity_norm > 0.0) {
+    const V3D & gravity_W = config_.preintegration.gravity;
+    const V3D specific_force_W = -gravity_W;
 
     // Assuming bias is small (magnitude is less than 1m/s^2) the max angle between
     // the true gravity in the body frame and the acc_mean is 0.0922 rad or 5.28 degrees
-    gtsam::Rot3 R_I_W = gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(gravity_W, acc_mean));
+    gtsam::Rot3 R_I_W =
+      gtsam::Rot3(Eigen::Quaterniond().setFromTwoVectors(specific_force_W, acc_mean));
     R_W_B = R_I_W.inverse();
+
+    // Accelerometer measurements constrain roll and pitch but not heading. When requested, use
+    // the heading reported in the IMU message while retaining the gravity-derived tilt.
+    if (initial_yaw) {
+      const V3D gravity_aligned_ypr = R_W_B.ypr();
+      R_W_B = gtsam::Rot3::Ypr(
+        *initial_yaw, gravity_aligned_ypr(1), gravity_aligned_ypr(2));
+    }
 
     // This orientation is correct up to 5.28 degrees assuming magnitude(bias) < 1m/s^2
 
-    // Assuming this orientation, the gravity vector is simply the acc_mean rescaled to the gravity magnitude
+    // Assuming this orientation, rescale the measured direction to the configured gravity norm.
     const V3D estimated_gravity_vector =
-      acc_mean.normalized() * config_.preintegration.gravity_magnitude;
+      acc_mean.normalized() * gravity_norm;
 
     // This is then used to estimate the accelerometer bias
     estimated_acc_bias = acc_mean - estimated_gravity_vector;
 
     preintegrator_params_ = generatePreintegratorParams();
   } else {
-    // Initial orientation is identity
-    R_W_B = gtsam::Rot3::Identity();
-    // Gravity is the direction that allows this to be identity
-    V3D gravity = -acc_mean.normalized() * config_.preintegration.gravity_magnitude;
-    estimated_acc_bias = acc_mean + gravity;
+    // Without gravity alignment, initialize only the requested heading.
+    R_W_B = initial_yaw ? gtsam::Rot3::Yaw(*initial_yaw) : gtsam::Rot3::Identity();
+    // Choose gravity so the measured specific force is consistent with this orientation. When
+    // gravity is disabled, its direction is undefined and the stationary acceleration is bias.
+    V3D gravity = V3D::Zero();
+    if (gravity_norm > 0.0) {
+      gravity = R_W_B * (-acc_mean.normalized() * gravity_norm);
+    }
+    estimated_acc_bias = acc_mean + R_W_B.inverse() * gravity;
     preintegrator_params_ = generatePreintegratorParams(gravity);
   }
   preintegrator_ = std::make_unique<gtsam::PreintegratedImuMeasurements>(preintegrator_params_);
@@ -459,6 +553,22 @@ void Manager::addImuFactorAndGetNavState(
     logger_->trace("predicted state");
   }
 
+  // Publish the initial state that the IMU contributes to the graph. This is deliberately
+  // emitted before the factor is handed to the smoother, so it never contains an optimized state.
+  mimosa_msgs::msg::FactorGraphState factor_graph_state;
+  factor_graph_state.header.stamp = toStamp(ts_1);
+  factor_graph_state.header.frame_id = config_.map_frame;
+  factor_graph_state.state_index = key_1;
+  convert(ns_1.pose(), factor_graph_state.pose);
+  convert(ns_1.velocity(), factor_graph_state.velocity);
+  convert(state_0.imuBias().accelerometer(), factor_graph_state.accelerometer_bias);
+  convert(state_0.imuBias().gyroscope(), factor_graph_state.gyroscope_bias);
+  convert(
+    state_0.gravity().unitVector() * config_.preintegration.gravity.norm(),
+    factor_graph_state.gravity);
+  convert(state_0.navState().pose().between(ns_1.pose()), factor_graph_state.pose_delta);
+  pub_factor_graph_state_->publish(factor_graph_state);
+
   gtsam::Values values;
   values.insert(X(state_0.key()), state_0.navState().pose());
   values.insert(V(state_0.key()), state_0.navState().velocity());
@@ -501,7 +611,7 @@ void Manager::setPropagationBaseState(const State & state)
   logger_->trace("Setting propagation base state");
 
   std::lock_guard<std::mutex> lock(propagation_mutex_);
-  if (state.ts() > propagation_base_state_.ts()) {
+  if (state.ts() >= propagation_base_state_.ts()) {
     propagation_base_state_ = state;
     propagation_preintegrator_->resetIntegrationAndSetBias(propagation_base_state_.imuBias());
     propagated_upto_ts_ = propagation_base_state_.ts();
@@ -519,7 +629,7 @@ void declare_config(PreintegrationConfig & config)
   field(config.integration_sigma, "integration_sigma", "-");
   field(config.use_2nd_order_coriolis, "use_2nd_order_coriolis", "bool");
   field(config.use_estimated_gravity, "use_estimated_gravity", "bool");
-  field(config.gravity_magnitude, "gravity_magnitude", "m/s^2");
+  field(config.gravity, "gravity", "m/s^2");
   field(config.gravity_aligned_initialization, "gravity_aligned_initialization", "bool");
 
   check(config.acc_noise_density, GT, 0.0, "acc_noise_density");
@@ -527,7 +637,7 @@ void declare_config(PreintegrationConfig & config)
   check(config.gyro_noise_density, GT, 0.0, "gyro_noise_density");
   check(config.gyro_bias_random_walk, GT, 0.0, "gyro_bias_random_walk");
   check(config.integration_sigma, GE, 0.0, "integration_sigma");
-  check(config.gravity_magnitude, GT, 0.0, "gravity_magnitude");
+  checkCondition(config.gravity.allFinite(), "gravity must contain only finite values");
 }
 
 void declare_config(ManagerConfig & config)
@@ -538,29 +648,44 @@ void declare_config(ManagerConfig & config)
   field(config.logs_directory, "logs_directory", "directory_path");
   field(config.map_frame, "map_frame", "str");
   field(config.body_frame, "body_frame", "str");
-
   {
     NameSpace ns("imu");
     {
       NameSpace ns("manager");
       field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
       field(config.ts_offset, "ts_offset", "s");
+      field(config.reliable_qos, "reliable_qos", "bool");
       field(config.max_buffer_duration, "max_buffer_duration", "s");
       field(config.pose_init_wait_secs, "pose_init_wait_secs", "s");
+      field(config.pose_init_max_acc_std, "pose_init_max_acc_std", "m/s^2");
+      field(config.pose_init_max_gyro_std, "pose_init_max_gyro_std", "rad/s");
+      field(config.pose_init_max_gyro_mean, "pose_init_max_gyro_mean", "rad/s");
+      field(
+        config.pose_init_max_gravity_error, "pose_init_max_gravity_error", "m/s^2");
       field(config.interpolation_max_ts_diff, "interpolation_max_ts_diff", "s");
       field(config.extrapolation_max_ts_diff, "extrapolation_max_ts_diff", "s");
       field(config.acc_scale_factor, "acc_scale_factor");
       field(config.max_acceleration_magnitude, "max_acceleration_magnitude", "m/s^2");
+      enum_field(
+        config.initial_yaw, "initial_yaw",
+        std::vector<std::string>{"simulation", "configuration"});
+      field(config.initial_yaw_deg, "initial_yaw_deg", "deg");
     }
     field(config.preintegration, "preintegration");
   }
   check(config.max_buffer_duration, GT, 0.5, "max_buffer_duration");
   check(config.pose_init_wait_secs, GE, 0.0, "pose_init_wait_secs");
+  check(config.pose_init_max_acc_std, GT, 0.0, "pose_init_max_acc_std");
+  check(config.pose_init_max_gyro_std, GT, 0.0, "pose_init_max_gyro_std");
+  check(config.pose_init_max_gyro_mean, GT, 0.0, "pose_init_max_gyro_mean");
+  check(config.pose_init_max_gravity_error, GT, 0.0, "pose_init_max_gravity_error");
   check(config.interpolation_max_ts_diff, GT, 0.005, "interpolation_max_ts_diff");
   check(config.extrapolation_max_ts_diff, GT, 0.005, "extrapolation_max_ts_diff");
   check(config.acc_scale_factor, GE, 1.0, "acc_scale_factor");
   check(config.acc_scale_factor, LT, 10.0, "acc_scale_factor");
   check(config.max_acceleration_magnitude, GE, 0.0, "max_acceleration_magnitude");
+  check(config.initial_yaw_deg, GE, -180.0, "initial_yaw_deg");
+  check(config.initial_yaw_deg, LE, 180.0, "initial_yaw_deg");
 }
 
 }  // namespace imu

@@ -9,7 +9,7 @@ This package implements a tightly-coupled multi-modal fusion framework. It curre
 
 ## Working Description
 
-mimosa maintains a sliding window factor graph to fuse factors generated from multiple sensors. On arrival of a new measurement (a pointcloud from the LiDAR or Radar or an odometry message from an external odometry source like VIO), a new state is "declared" in the graph and connected with a preintegrated IMU factor. Then the measurement gets processed by the corresponding sensor manager to generate a new factor(s). This factor(s) is(are) then added to the graph and the graph is optimized. The optimized state is then published on `mimosa_node/graph/odometry` topic as a `nav_msgs/Odometry` message.
+mimosa maintains a sliding window factor graph to fuse factors generated from multiple sensors. On arrival of a new measurement (a pointcloud from the LiDAR or Radar or an odometry message from an external odometry source like VIO), a new state is "declared" in the graph and connected with a preintegrated IMU factor. Then the measurement gets processed by the corresponding sensor manager to generate a new factor(s). This factor(s) is(are) then added to the graph and the graph is optimized. Between these corrections, every accepted IMU sample predicts forward from the latest optimized state without updating the factor graph. Both the IMU-rate predictions and corrected states are published on `mimosa_node/graph/odometry` as `nav_msgs/Odometry` messages.
 
 ### IMU Factor
 
@@ -56,9 +56,92 @@ For offline processing, replay a ROS 2 bag with simulated time:
 ros2 launch mimosa mimosa_bag.launch.py profile:=enwide bag_name:=/path/to/ros2_bag viz:=true
 ```
 
-Available profiles are `enwide`, `euroc`, `hornbill`, `lapwing`, `magpie`,
-`newer_college`, and `parrot`. Input topics can be overridden with
+To run the complete M113 workflow (launch MIMOSA with RViz, record all topics,
+play an input bag, stop recording when playback finishes, and generate the
+factor-graph report), use:
+
+```bash
+ros2 run mimosa run_mimosa_bag.sh /path/to/input_bag /path/to/new_output_bag
+```
+
+The defaults can be changed with command-line flags. For example:
+
+```bash
+ros2 run mimosa run_mimosa_bag.sh \
+  --viz false --rate 0.5 --config-override /path/to/override.yaml \
+  /path/to/input_bag /path/to/new_output_bag
+```
+
+Run `ros2 run mimosa run_mimosa_bag.sh --help` for all options and passthrough
+arguments for launch, recording, playback, and report generation.
+
+Available profiles are `enwide`, `euroc`, `hornbill`, `lapwing`, `m113`,
+`magpie`, `newer_college`, and `parrot`. Input topics can be overridden with
 `imu_topic`, `lidar_topic`, `radar_topic`, and `odometry_topic` launch arguments.
+
+### Pre-optimization debug states
+
+Mimosa publishes the sensor state supplied to the factor graph before GTSAM optimization on:
+
+- `/debug/imu/state`: the IMU-preintegrated initial state for the new graph state.
+- `/debug/lidar/state`: the state at which the LiDAR factors were built and linearized.
+
+Both topics use `mimosa_msgs/msg/FactorGraphState`. The message contains the shared graph-state
+index, pose, velocity, accelerometer bias, gyroscope bias, full gravity vector in m/s², and the
+source-calculated `pose_delta` from the previous graph pose. The report composes these deltas to
+show cumulative IMU and LiDAR motion without deriving increments from later state samples. Use
+`/mimosa_node/graph/odometry` for the optimized output state.
+
+Generate an interactive comparison report from a ROS 2 bag containing these topics:
+
+```bash
+python3 src/mimosa/mimosa/scripts/factor_graph_state_report.py /path/to/ros2_bag \
+  --output factor_graph_report.html
+```
+
+When `--output` is omitted, the report is written to `factor_graph_report.html` inside the ROS 2 bag
+directory. The M113 profile configuration is also copied into the report directory as `m113.yaml`
+so the parameters used for the run can be kept with the report.
+
+The report reads raw IMU measurements from `/sensing/imu/imu_raw` (`sensor_msgs/msg/Imu`) and GPS
+ground truth from `/sensing/gnss/nav_sat_fix`. It plots raw three-axis linear acceleration and
+angular velocity in dedicated figures. It also integrates angular velocity and acceleration into
+orientation and position traces for the comparison graphs. The orientation supplied in the IMU
+message is plotted as a separate roll, pitch, and yaw trace but is not used by the integration.
+The integration assumes that the first second is stationary to estimate gyroscope bias and
+stationary specific force. Position and orientation start at the first optimized Mimosa output
+pose, falling back to the first AWSIM ground-truth pose when Mimosa output is unavailable; velocity
+starts at zero. GPS fixes are converted to a local WGS84 ENU frame. The
+report contains one figure for each position axis (`x`, `y`, and `z`) with the
+IMU, LiDAR, optimized Mimosa output (`/mimosa_node/graph/odometry`), and GPS traces plus their
+corresponding GPS errors. It also contains one figure for roll, pitch, and yaw with the IMU, LiDAR,
+and optimized output traces plus their differences against IMU, and an aligned 3D trajectory.
+`NavSatFix` has no orientation, so GPS cannot be included in the orientation figures.
+The existing position and orientation figures also include traces built by cumulatively composing
+the `pose_delta` values published by the IMU and LiDAR paths, including their difference in each
+error subplot and each cumsum's error against AWSIM ground truth. Each cumulative orientation is
+anchored to that source's first recorded orientation. Mimosa output and cumulative-state positions
+are linearly interpolated and their orientations are quaternion-SLERPed to each AWSIM ground-truth
+timestamp before these errors are calculated.
+
+By default the script estimates an SE(3) transform from the Mimosa map frame to the GPS ENU frame
+without changing trajectory scale, and applies that same transform to the IMU, LiDAR, and optimized
+Mimosa states.
+Use `--gps-alignment translation` when the frames already have the same axes, or
+`--gps-alignment none` when they are already coincident. Use `--gps-max-time-difference` to control
+GPS timestamp matching, `--gps-topic` to override the GPS topic, `--odometry-topic` to override the
+optimized output topic, `--raw-imu-topic` to override the raw IMU input topic,
+`--max-time-difference` to control IMU/LiDAR matching and the maximum distance from an AWSIM
+timestamp to the nearest interpolated-source endpoint, and
+`--plotlyjs cdn` to create a smaller report that loads Plotly from the internet.
+
+The report generator is a standalone Python script and does not use ROS Python libraries or require
+a running ROS environment. It reads ROS 2 SQLite (`.db3`) and MCAP bags directly. NumPy and Plotly
+are required; the pure-Python `mcap` package is additionally required only for MCAP input:
+
+```bash
+python3 -m pip install numpy plotly mcap
+```
 
 ### Examples
 

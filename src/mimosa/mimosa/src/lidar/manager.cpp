@@ -32,6 +32,8 @@ Manager::Manager(
 
   pub_points_ = pnh.create_publisher<sensor_msgs::msg::PointCloud2>("lidar/manager/points_full_res", 1);
   pub_debug_ = pnh.create_publisher<mimosa_msgs::msg::LidarManagerDebug>("lidar/manager/debug", 1);
+  pub_factor_graph_state_ =
+    pnh.create_publisher<mimosa_msgs::msg::FactorGraphState>("/debug/lidar/state", 10);
 
   // Setup trajectory logger
   trajectory_logger_ = createLogger(
@@ -134,6 +136,27 @@ void Manager::callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
     getFactors(initial_values, new_factors);
 
     define(new_factors, opt_values, dr);
+
+    // Publish the graph state after the scan-to-map ICP factors have been applied.
+    // Unlike propagated_state_, these values include the LiDAR correction from GTSAM.
+    mimosa_msgs::msg::FactorGraphState factor_graph_state;
+    factor_graph_state.header.stamp = toStamp(corrected_ts_);
+    factor_graph_state.header.frame_id = config_.base.map_frame;
+    factor_graph_state.state_index = new_key_;
+    convert(opt_values.at<gtsam::Pose3>(X(new_key_)), factor_graph_state.pose);
+    convert(opt_values.at<V3D>(V(new_key_)), factor_graph_state.velocity);
+    const auto & optimized_bias =
+      opt_values.at<gtsam::imuBias::ConstantBias>(B(new_key_));
+    convert(optimized_bias.accelerometer(), factor_graph_state.accelerometer_bias);
+    convert(optimized_bias.gyroscope(), factor_graph_state.gyroscope_bias);
+    convert(
+      opt_values.at<gtsam::Unit3>(G(0)).unitVector() *
+        imu_manager_->config().preintegration.gravity.norm(),
+      factor_graph_state.gravity);
+    convert(
+      prev_state_.navState().pose().between(opt_values.at<gtsam::Pose3>(X(new_key_))),
+      factor_graph_state.pose_delta);
+    pub_factor_graph_state_->publish(factor_graph_state);
 
     // const gtsam::NonlinearFactorGraph factors = graph_manager_->getFactors();
     // photometric_->visualizeTracks(

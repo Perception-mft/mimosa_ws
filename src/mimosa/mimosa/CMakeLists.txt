@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 project(mimosa)
 
+# PCL's FindFLANN module uses FLANN_ROOT. Honor it on CMake 3.27+ and avoid
+# the CMP0144 developer warning while retaining compatibility with older CMake.
+# PCLConfig.cmake resets its policy version, so also provide the nested scope's
+# default explicitly.
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW)
+  set(CMAKE_POLICY_DEFAULT_CMP0144 NEW)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -50,12 +59,13 @@ install(TARGETS ${PROJECT_NAME}_lib mimosa_node
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config rviz plotjuggler data DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config rviz plotjuggler data model DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING PATTERN "*.launch.py")
 install(PROGRAMS
   scripts/dataset_evaluation.py scripts/topic_to_file.py
-  scripts/tum_path_publisher.py scripts/batch_process.sh
+  scripts/tum_path_publisher.py scripts/factor_graph_state_report.py
+  scripts/batch_process.sh scripts/run_mimosa_bag.sh
   DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)

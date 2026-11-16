@@ -6,10 +6,13 @@
 
 #pragma once
 
+#include <functional>
+
 // mimosa
 #include "mimosa/state.hpp"
 #include "mimosa/stopwatch.hpp"
 #include "mimosa/utils.hpp"
+#include "mimosa_msgs/msg/factor_graph_state.hpp"
 
 // mimosa_msgs
 #include "mimosa_msgs/msg/imu_manager_debug.hpp"
@@ -25,6 +28,7 @@
 
 // C++
 #include <deque>
+#include <optional>
 
 namespace mimosa
 {
@@ -33,6 +37,12 @@ typedef std::deque<ImuMeasurement> ImuBuffer;
 
 namespace imu
 {
+enum class InitialYawSource
+{
+  SIMULATION,
+  CONFIGURATION,
+};
+
 struct PreintegrationConfig
 {
   float acc_noise_density = 0.0013886655606357616;
@@ -42,7 +52,7 @@ struct PreintegrationConfig
   float integration_sigma = 1.0e-4;
   bool use_2nd_order_coriolis = false;
   bool use_estimated_gravity = false;
-  float gravity_magnitude = 9.81;
+  V3D gravity = V3D(0.0, 0.0, -9.81);  // m/s^2; zero disables gravity
   bool gravity_aligned_initialization = true;
 };
 
@@ -55,12 +65,19 @@ struct ManagerConfig
   std::string map_frame = "mimosa_map";
   std::string body_frame = "mimosa_body";
   float ts_offset = 0.0;                   // s
+  bool reliable_qos = false;
   float max_buffer_duration = 2.0;         // s
   float pose_init_wait_secs = 1.0;         // s
+  float pose_init_max_acc_std = 0.2;       // m/s^2
+  float pose_init_max_gyro_std = 0.02;     // rad/s
+  float pose_init_max_gyro_mean = 0.05;    // rad/s
+  float pose_init_max_gravity_error = 1.0; // m/s^2
   float interpolation_max_ts_diff = 0.01;  // s
   float extrapolation_max_ts_diff = 0.01;  // s
   float acc_scale_factor = 1.0;            // used only when IMU measurements are in units of g
   float max_acceleration_magnitude = 0.0;  // m/s^2; zero disables the limit
+  InitialYawSource initial_yaw = InitialYawSource::CONFIGURATION;
+  float initial_yaw_deg = 0.0;
 
   PreintegrationConfig preintegration;
 };
@@ -80,6 +97,7 @@ private:
   // Member variables
   ImuBuffer buffer_;
   std::mutex buffer_mutex_;
+  std::optional<double> orientation_yaw_;
   bool has_recieved_first_message_ = false;
   std::shared_ptr<gtsam::PreintegrationParams> preintegrator_params_;
   std::unique_ptr<gtsam::PreintegratedImuMeasurements> preintegrator_;
@@ -91,9 +109,12 @@ private:
   State propagation_base_state_;
   double propagated_upto_ts_ = 0;
   std::mutex propagation_mutex_;
+  std::function<void(double)> measurement_callback_;
+  std::function<void(double, const gtsam::NavState &, const State &)> propagation_callback_;
 
   // Outputs
   rclcpp::Publisher<mimosa_msgs::msg::ImuManagerDebug>::SharedPtr pub_debug_;
+  rclcpp::Publisher<mimosa_msgs::msg::FactorGraphState>::SharedPtr pub_factor_graph_state_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_localizability_marker_array_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odometry_;
 
@@ -108,6 +129,7 @@ private:
     const gtsam::Key key_0, const gtsam::Key key_1, gtsam::NonlinearFactorGraph & graph);
   V6D interpolateMeasurement(
     const double ts1, const V6D & meas1, const double ts2, const V6D & meas2, const double ts);
+  void initialYawCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg);
 
 public:
   using Ptr = std::shared_ptr<Manager>;
@@ -119,6 +141,15 @@ public:
   }
   inline bool hasRecievedFirstMessage() const { return has_recieved_first_message_; }
   void callback(sensor_msgs::msg::Imu::ConstSharedPtr msg);
+  inline void setMeasurementCallback(std::function<void(double)> callback)
+  {
+    measurement_callback_ = std::move(callback);
+  }
+  inline void setPropagationCallback(
+    std::function<void(double, const gtsam::NavState &, const State &)> callback)
+  {
+    propagation_callback_ = std::move(callback);
+  }
   bool estimateAttitude(gtsam::Rot3 & R_W_B, V3D & estimated_acc_bias, V3D & estimated_gyro_bias);
   void getInterpolatedMeasurements(
     const double ts_start, const double ts_end, ImuBuffer & measurements,
