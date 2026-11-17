@@ -32,9 +32,6 @@ int main(int argc, char ** argv)
   mimosa::radar::Manager radar_manager(*node, imu_manager, graph_manager);
   mimosa::odometry::Manager odometry_manager(*node, imu_manager, graph_manager);
 
-  graph_manager->setImuOnlyMode(
-    !lidar_manager.isEnabled() && !radar_manager.isEnabled() && !odometry_manager.isEnabled());
-
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 3);
   executor.add_node(node);
   executor.spin();

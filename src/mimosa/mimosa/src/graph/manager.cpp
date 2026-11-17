@@ -56,15 +56,6 @@ Manager::~Manager()
   imu_manager_->setPropagationCallback({});
 }
 
-void Manager::setImuOnlyMode(const bool enabled)
-{
-  std::lock_guard<std::mutex> lock(graph_mutex_);
-  imu_only_mode_ = enabled;
-  logger_->info(
-    "IMU-only mode {}. IMU samples are propagated without running graph optimization",
-    enabled ? "enabled" : "disabled");
-}
-
 gtsam::ISAM2Params Manager::getISAM2Params() const
 {
   gtsam::ISAM2GaussNewtonParams gnp;
@@ -530,18 +521,16 @@ Manager::DeclarationResult Manager::declareNoLock(
 
 void Manager::handleImuMeasurement(const double ts)
 {
-  // With no correction sensor, use the IMU stream only to establish the initial anchor. Every
-  // later sample is a cheap preintegration prediction handled by handleImuPropagation().
-  if (!imu_only_mode_) return;
-
   std::lock_guard<std::mutex> lock(graph_mutex_);
   if (initialized_) return;
 
+  // Initialize from the IMU stream as soon as the configured stationary window is available.
+  // Subsequent samples are predictions from the latest optimized state and do not add graph keys.
   gtsam::Key key;
   const auto result = declareNoLock(ts, key, true, {});
   if (result == DeclarationResult::SUCCESS_INITIALIZED) {
     imu_manager_->setPropagationBaseState(state_);
-    logger_->debug("Initialized IMU-only propagation at ts {}", ts);
+    logger_->debug("Initialized IMU-rate propagation at ts {}", ts);
   }
 }
 
@@ -911,13 +900,9 @@ void declare_config(ManagerConfig & config)
     NameSpace ns("graph/manager");
     field(config.log_level, "log_level", "trace|debug|info|warn|error|critical");
     field(config.max_measurement_latency, "max_measurement_latency", "s");
-    field(config.imu_only_timeout, "imu_only_timeout", "s");
-    field(config.imu_only_update_rate_hz, "imu_only_update_rate_hz", "Hz");
     field(config.smoother, "smoother");
   }
 
-  check(config.imu_only_timeout, GE, 0.0, "imu_only_timeout");
-  check(config.imu_only_update_rate_hz, GE, 0.0, "imu_only_update_rate_hz");
   check(config.body_frame, NE, config.map_frame, "body_frame");
 }
 
