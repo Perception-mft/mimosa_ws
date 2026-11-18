@@ -88,7 +88,12 @@ void Manager::callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
       throw std::runtime_error("Unsupported point type");
   }
 
-  graph_manager_->getStateUpto(header_ts_, prev_state_);
+  // The first scan is used to initialize the LiDAR pipeline and is not deskewed. The graph may
+  // already have been initialized by a later IMU sample, so looking up the scan-start state here
+  // can otherwise request a timestamp older than the graph's first state and abort the process.
+  if (initialized_) {
+    graph_manager_->getStateUpto(header_ts_, prev_state_);
+  }
 
   logger_->debug("Declaring (ts: {})", corrected_ts_);
   Stopwatch sw_declare;

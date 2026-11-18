@@ -21,7 +21,7 @@ PROFILES = {
     "magpie": ("/vectornav_driver_node/imu/data", "/rslidar_points", "/radar/cloud", "", "../os_dummy.json"),
     "newer_college": ("/os_cloud_node/imu", "/os_cloud_node/points", "", "", "os_newer_college.json"),
     "parrot": ("/vectornav_driver_node/imu/data", "/lidar_points", "/radar/cloud", "/rovio/odometry", "../os_dummy.json"),
-    "m113": ("/sensing/imu/imu_raw", "/sensing/lidar/Front/pointcloud_raw", "/radar/cloud", "", "../os_dummy.json"),
+    "m113": ("/sensing/imu/imu_error", "/sensing/lidar/Front/pointcloud_raw", "/radar/cloud", "", "../os_dummy.json"),
 }
 
 
