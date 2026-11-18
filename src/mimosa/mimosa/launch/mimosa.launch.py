@@ -67,7 +67,13 @@ def _launch(context):
             params.update(_flatten(yaml.safe_load(stream)))
 
     params["use_sim_time"] = LaunchConfiguration("use_sim_time").perform(context).lower() == "true"
-    defaults = PROFILES[profile][:4]
+    defaults = list(PROFILES[profile][:4])
+    use_imu_error = LaunchConfiguration("imu_error").perform(context).lower() == "true"
+    imu_error_input_topic = LaunchConfiguration("imu_error_input_topic").perform(context)
+    imu_error_output_topic = LaunchConfiguration("imu_error_output_topic").perform(context)
+    if profile == "m113":
+        defaults[0] = imu_error_output_topic if use_imu_error else imu_error_input_topic
+
     inputs = [
         LaunchConfiguration("imu_topic").perform(context) or defaults[0],
         LaunchConfiguration("lidar_topic").perform(context) or defaults[1],
@@ -91,7 +97,21 @@ def _launch(context):
             "__VK_LAYER_NV_optimus": "NVIDIA_only",
         }
 
-    return [
+    nodes = []
+    if profile == "m113" and use_imu_error:
+        nodes.append(
+            Node(
+                package="imu_error", executable="imu_error", name="imu_error",
+                output="screen",
+                parameters=[{
+                    "input_topic": imu_error_input_topic,
+                    "output_topic": imu_error_output_topic,
+                    "use_sim_time": params["use_sim_time"],
+                }],
+            )
+        )
+
+    nodes.extend([
         Node(
             package="mimosa", executable="mimosa_node", name="mimosa_node",
             namespace="mimosa_node", output="screen", parameters=[params],
@@ -112,16 +132,20 @@ def _launch(context):
             additional_env=rviz_env,
             condition=IfCondition(LaunchConfiguration("viz")), output="screen",
         ),
-    ]
+    ])
+    return nodes
 
 
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("profile", default_value="hornbill"),
-        DeclareLaunchArgument("viz", default_value="false"),
+        DeclareLaunchArgument("viz", default_value="true"),
         DeclareLaunchArgument("rviz_gpu", default_value="true"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("config_override", default_value=""),
+        DeclareLaunchArgument("imu_error", default_value="false"),
+        DeclareLaunchArgument("imu_error_input_topic", default_value="/sensing/imu/imu_raw"),
+        DeclareLaunchArgument("imu_error_output_topic", default_value="/sensing/imu/imu_error"),
         DeclareLaunchArgument("imu_topic", default_value=""),
         DeclareLaunchArgument("lidar_topic", default_value=""),
         DeclareLaunchArgument("radar_topic", default_value=""),
