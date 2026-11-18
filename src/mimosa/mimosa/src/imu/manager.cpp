@@ -142,7 +142,7 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(propagation_mutex_);
 
-    const double dt = it_current->first - propagated_upto_ts_;
+    double dt = it_current->first - propagated_upto_ts_;
 
     if (dt < 0) {
     // The current imu measurement is older than the last propagated state
@@ -171,7 +171,12 @@ void Manager::callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
         propagated_upto_ts_ = it_previous->first;
       }
 
-    // Update the preintegrator with the previous imu measurement for the dt
+      // A correction can move propagated_upto_ts_ back to the LiDAR state timestamp. After the
+      // catch-up above, integrate only the remaining interval to the current sample; using the
+      // original base-to-current dt here would integrate the catch-up interval twice.
+      dt = it_current->first - propagated_upto_ts_;
+
+    // Update the preintegrator with the previous imu measurement for the remaining dt
       propagation_preintegrator_->integrateMeasurement(
         it_previous->second.head<3>(), it_previous->second.tail<3>(), dt);
       propagated_upto_ts_ = it_current->first;

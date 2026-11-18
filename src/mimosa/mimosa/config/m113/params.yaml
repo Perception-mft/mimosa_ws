@@ -31,7 +31,7 @@ imu:
     use_2nd_order_coriolis: false
     use_estimated_gravity: false
     gravity: [0.0, 0.0, -9.81000062] # [m/s^2] Gravity vector in the navigation frame
-    gravity_aligned_initialization: true
+    gravity_aligned_initialization: false
 
 graph:
   manager:
