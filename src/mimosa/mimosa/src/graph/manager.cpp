@@ -503,6 +503,12 @@ Manager::DeclarationResult Manager::declareNoLock(
   // Update the current state
   updateStateToKeyTs(key, ts);
 
+  // Keep IMU-rate propagation attached to the graph state while an exteroceptive manager prepares
+  // its correction factors. Without this reset, state_ has the newly declared key while the IMU
+  // manager still uses the previous key, so every prediction produced between declare() and
+  // define() is rejected as stale. define() resets the base again after the correction is applied.
+  imu_manager_->setPropagationBaseState(state_);
+
   if (rekeyed_one_step_factors.size()) {
     // These difference values are only valid when there is a propagation and correction step
     const auto p = smoother_->calculateEstimate<gtsam::Pose3>(X(key));
@@ -513,7 +519,6 @@ Manager::DeclarationResult Manager::declareNoLock(
     debug_msg_.diff_against_imu_prior_vel_cm_p_s =
       (v - propagated_state.velocity()).norm() * 100;  // Convert to cm/s
 
-    imu_manager_->setPropagationBaseState(state_);
     publishResults();
   }
   return Manager::DeclarationResult::SUCCESS_NORMAL;
