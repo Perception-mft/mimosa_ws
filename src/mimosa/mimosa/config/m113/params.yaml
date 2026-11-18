@@ -4,6 +4,7 @@ navigation_frame: mimosa_navigation
 body_frame: mimosa_body
 
 imu:
+  topic: /sensing/imu/imu_raw
   manager:
     log_level: warn
     ts_offset: 0
@@ -62,6 +63,7 @@ graph:
 
 
 lidar:
+  topic: /sensing/lidar/Front/pointcloud_raw
   sensor_frame: mimosa_lidar
   T_B_S: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
   T_B_OdometryLoggerFrame: [1.44, 0.0, 1.28, 0.0, 0.0, 0.0, 1.0] # x, y, z, x, y, z, w
@@ -148,6 +150,7 @@ lidar:
     max_error: 0.5075
 
 radar:
+  topic: /radar/cloud
   sensor_frame: mimosa_radar
   T_B_S: [0.08373, 0.0213, 0.02691, 0.6830127, 0.1830128, -0.1830128, 0.6830127] # x, y, z, x, y, z, w
   manager:
@@ -167,6 +170,7 @@ radar:
     noise_sigma: 0.037527767
 
 odometry:
+  topic: ""
   sensor_frame: mimosa_odometry
   T_B_S: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:

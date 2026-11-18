@@ -3,6 +3,7 @@ map_frame: mimosa_map
 body_frame: mimosa_body
 
 imu:
+  topic: /os_cloud_node/imu
   manager:
     log_level: info
     max_buffer_duration: 1.1
@@ -54,6 +55,7 @@ graph:
 
 
 lidar:
+  topic: /os_cloud_node/points
   sensor_frame: mimosa_lidar
   T_B_S: [-0.006253, 0.011775, 0.0028525, 0, 0, 0, 1] # x, y, z, x, y, z, w
   T_B_OdometryLoggerFrame: [0.014, -0.012, -0.106, 0.003, -0.005, -0.002, 1.000] # x, y, z, x, y, z, w

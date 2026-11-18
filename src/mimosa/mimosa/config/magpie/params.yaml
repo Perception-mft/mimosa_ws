@@ -4,6 +4,7 @@ navigation_frame: mimosa_navigation
 body_frame: mimosa_body
 
 imu:
+  topic: /vectornav_driver_node/imu/data
   manager:
     log_level: warn
     ts_offset: 0
@@ -56,6 +57,7 @@ graph:
 
 
 lidar:
+  topic: /rslidar_points
   sensor_frame: mimosa_lidar
   T_B_S: [-0.06605, -0.01878, 0.034, 0.707, 0.00, -0.707, 0.00] # x, y, z, x, y, z, w
   T_B_OdometryLoggerFrame: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
@@ -141,6 +143,7 @@ lidar:
     max_error: 0.5075
 
 radar:
+  topic: /radar/cloud
   sensor_frame: mimosa_radar
   # T_B_S: [0.080, -0.034, 0.016, 0.000, 0.259, 0.000, 0.966] # x, y, z, x, y, z, w
   T_B_S: [0.07717380907196035, -0.0479741168664902, 0.006770362043579366, 0.01761050968654745, 0.25032180256367187, -0.017699746191127304, 0.9679631109162291] # x, y, z, x, y, z, w # Estimated from RIG
@@ -160,6 +163,7 @@ radar:
     noise_sigma: 0.037527767
 
 odometry:
+  topic: ""
   sensor_frame: mimosa_odometry
   T_B_S: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:

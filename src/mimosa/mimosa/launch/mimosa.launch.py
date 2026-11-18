@@ -14,14 +14,14 @@ from launch_ros.actions import Node
 
 
 PROFILES = {
-    "enwide": ("/ouster/imu", "/ouster/points", "", "", "os_enwide.json"),
-    "euroc": ("/imu0", "", "", "/rovio/odometry", "../os_dummy.json"),
-    "hornbill": ("/vectornav_driver_node/imu/data", "/ouster/points", "/radar/cloud", "", "os_hornbill.json"),
-    "lapwing": ("/vectornav_driver_node/imu/data", "/livox/lidar", "/radar/cloud", "/rovio/odometry", "../os_dummy.json"),
-    "magpie": ("/vectornav_driver_node/imu/data", "/rslidar_points", "/radar/cloud", "", "../os_dummy.json"),
-    "newer_college": ("/os_cloud_node/imu", "/os_cloud_node/points", "", "", "os_newer_college.json"),
-    "parrot": ("/vectornav_driver_node/imu/data", "/lidar_points", "/radar/cloud", "/rovio/odometry", "../os_dummy.json"),
-    "m113": ("/sensing/imu/imu_raw", "/sensing/lidar/Front/pointcloud_raw", "/radar/cloud", "", "../os_dummy.json"),
+    "enwide": "os_enwide.json",
+    "euroc": "../os_dummy.json",
+    "hornbill": "os_hornbill.json",
+    "lapwing": "../os_dummy.json",
+    "magpie": "../os_dummy.json",
+    "newer_college": "os_newer_college.json",
+    "parrot": "../os_dummy.json",
+    "m113": "../os_dummy.json",
 }
 
 
@@ -57,7 +57,7 @@ def _launch(context):
     with open(os.path.join(share, "model", "m113.urdf"), encoding="utf-8") as stream:
         robot_description = stream.read()
 
-    metadata_path = os.path.normpath(os.path.join(profile_dir, PROFILES[profile][4]))
+    metadata_path = os.path.normpath(os.path.join(profile_dir, PROFILES[profile]))
     with open(metadata_path, encoding="utf-8") as stream:
         params.update(_flatten(json.load(stream), "lidar.sensor"))
 
@@ -67,12 +67,12 @@ def _launch(context):
             params.update(_flatten(yaml.safe_load(stream)))
 
     params["use_sim_time"] = LaunchConfiguration("use_sim_time").perform(context).lower() == "true"
-    defaults = PROFILES[profile][:4]
+    sensor_names = ["imu", "lidar", "radar", "odometry"]
+    configured_topics = [params.pop(f"{sensor}.topic", "") for sensor in sensor_names]
     inputs = [
-        LaunchConfiguration("imu_topic").perform(context) or defaults[0],
-        LaunchConfiguration("lidar_topic").perform(context) or defaults[1],
-        LaunchConfiguration("radar_topic").perform(context) or defaults[2],
-        LaunchConfiguration("odometry_topic").perform(context) or defaults[3],
+        LaunchConfiguration(f"{sensor}_topic").perform(context)
+        or configured_topic
+        for sensor, configured_topic in zip(sensor_names, configured_topics)
     ]
     internal = [
         "imu/manager/imu_in", "lidar/manager/lidar_in",
@@ -118,7 +118,7 @@ def _launch(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("profile", default_value="hornbill"),
-        DeclareLaunchArgument("viz", default_value="false"),
+        DeclareLaunchArgument("viz", default_value="true"),
         DeclareLaunchArgument("rviz_gpu", default_value="true"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("config_override", default_value=""),
