@@ -583,14 +583,18 @@ void Manager::getStateUptoNoLock(const double ts, State & state)
 
   auto it = ts_key_map_.upper_bound(ts);
   if (it == ts_key_map_.begin()) {
-    // This means that the timestamp is older than all the states that have ever been added
-
-    // If the difference between the timestamps is small, we can just warn and use the new state
-    if (std::abs(ts - ts_key_map_.begin()->first) > 4e-3) {  // 4ms
-      logCriticalException<std::runtime_error>(
-        logger_, fmt::format(
-                   "No state available up to ts: {} the only ts in there is {} . Size of map: {}",
-                   ts, ts_key_map_.begin()->first, ts_key_map_.size()));
+    // This means that the timestamp is older than all the states that have ever been added.
+    // This can legitimately happen right after initialization: a scan whose header ts predates
+    // the state the graph just initialized at can still be in flight (e.g. still being filtered).
+    // There is no earlier state to give the caller, so fall back to the first (and possibly only)
+    // state rather than aborting; the caller's own declare() call still independently validates
+    // the measurement's timestamp and will reject it on its own if it is genuinely too old.
+    const double gap = std::abs(ts - ts_key_map_.begin()->first);
+    if (gap > 4e-3) {  // 4ms
+      logger_->error(
+        "Requested state at ts: {} is older than the first state in the map (ts: {}, size: {}) "
+        "by {} s. Using the first state.",
+        ts, ts_key_map_.begin()->first, ts_key_map_.size(), gap);
     } else {
       logger_->warn(
         "Timestamp is older than all states ever, but within 4ms of the first state. Using the "
