@@ -76,7 +76,7 @@ Run `ros2 run mimosa run_mimosa_bag.sh --help` for all options and passthrough
 arguments for launch, recording, playback, and report generation.
 
 Available profiles are `enwide`, `euroc`, `hornbill`, `lapwing`, `m113`,
-`magpie`, `newer_college`, and `parrot`. Input topics can be overridden with
+`magpie`, `newer_college`, `parrot`, and `rellis`. Input topics can be overridden with
 `imu_topic`, `lidar_topic`, `radar_topic`, and `odometry_topic` launch arguments.
 
 ### Pre-optimization debug states
@@ -197,6 +197,23 @@ After downloading any of the sequences in the dataset, you can run the following
 
 ```bash
 ros2 launch mimosa mimosa_bag.launch.py profile:=newer_college bag_name:=/path/to/ros2_bag viz:=true
+```
+
+##### [RELLIS-3D Dataset](https://github.com/unmannedlab/RELLIS-3D)
+
+Download the dataset from [https://github.com/unmannedlab/RELLIS-3D](https://github.com/unmannedlab/RELLIS-3D)
+(Google Drive, no direct-link mirror). This profile only wires up the Ouster
+OS1 LiDAR and its own embedded IMU (`/os1_cloud_node/points` and
+`/os1_cloud_node/imu`); it does not yet use the dataset's Vectornav VN-300
+IMU/GPS or wheel odometry. See `VALIDATION_LOG.md` for open TODOs (extrinsic
+calibration derived from the bag's own tf tree but not independently
+verified, IMU noise values borrowed from `enwide`, Photometric disabled
+pending real OS1 beam intrinsics) before trusting results from this profile. The bags are ROS1; convert with the `rosbags`
+Python package first (see `VALIDATION_LOG.md`'s ENWIDE repro steps for the
+same conversion command, just with a different source/destination bag).
+
+```bash
+ros2 launch mimosa mimosa_bag.launch.py profile:=rellis bag_name:=/path/to/ros2_bag viz:=true
 ```
 
 ##### Complete Dataset Example

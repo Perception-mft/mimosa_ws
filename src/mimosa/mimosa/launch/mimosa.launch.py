@@ -22,6 +22,7 @@ PROFILES = {
     "newer_college": "os_newer_college.json",
     "parrot": "../os_dummy.json",
     "m113": "../os_dummy.json",
+    "rellis": "../os_dummy.json",
 }
 
 
