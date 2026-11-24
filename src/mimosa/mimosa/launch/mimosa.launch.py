@@ -106,6 +106,7 @@ def _launch(context):
                 parameters=[{
                     "input_topic": imu_error_input_topic,
                     "output_topic": imu_error_output_topic,
+                    "error_profile": LaunchConfiguration("imu_error_profile"),
                     "use_sim_time": params["use_sim_time"],
                 }],
             )
@@ -144,6 +145,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("config_override", default_value=""),
         DeclareLaunchArgument("imu_error", default_value="false"),
+        DeclareLaunchArgument("imu_error_profile", default_value="MS3025"),
         DeclareLaunchArgument("imu_error_input_topic", default_value="/sensing/imu/imu_raw"),
         DeclareLaunchArgument("imu_error_output_topic", default_value="/sensing/imu/imu_error"),
         DeclareLaunchArgument("imu_topic", default_value=""),

@@ -3,6 +3,10 @@ map_frame: mimosa_map
 navigation_frame: mimosa_navigation
 body_frame: mimosa_body
 
+platform:
+  # Robot self-filter box in the body frame: [width, length, height] [m].
+  size: [2.69, 4.86, 3.5]
+
 imu:
   manager:
     log_level: warn
@@ -49,7 +53,7 @@ graph:
       relinearize_skip: 1
       enable_relinearization: true
       evaluate_nonlinear_error: false
-      factorization: QR
+      factorization: CHOLESKY
       cache_linearized_factors: true
       enable_detailed_results: false
       enable_partial_relinearization_check: true

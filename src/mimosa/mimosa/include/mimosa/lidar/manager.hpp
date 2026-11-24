@@ -24,6 +24,10 @@ struct ManagerConfig
 {
   SensorManagerBaseConfig base;
 
+  // Platform bounding box in the body frame: [width (y), length (x), height (z)].
+  // A zero vector disables self-filtering.
+  V3D platform_size = V3D::Zero();
+
   // Lidar-specific fields
   gtsam::Pose3 T_B_OdometryLoggerFrame = gtsam::Pose3::Identity();
   bool transpose_pointcloud = false;
@@ -62,6 +66,9 @@ private:
   const float z_offset_;
   const float range_min_sq_;
   const float range_max_sq_;
+  const M3F R_B_S_;
+  const V3F t_B_S_;
+  const V3F platform_half_extents_;
   std::unique_ptr<gtsam::PreintegratedImuMeasurements> imu_preintegrator_;
   gtsam::NavState propagated_state_;
   mimosa_msgs::msg::LidarManagerDebug debug_msg_;

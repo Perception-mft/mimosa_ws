@@ -17,7 +17,12 @@ Manager::Manager(
     pnh, config::checkValid(config::fromRos<ManagerConfig>(pnh)), imu_manager, graph_manager, "lidar"),
   z_offset_(-config_.lidar_to_sensor_transform[11] / 1000.0),
   range_min_sq_(config_.range_min * config_.range_min),
-  range_max_sq_(config_.range_max * config_.range_max)
+  range_max_sq_(config_.range_max * config_.range_max),
+  R_B_S_(config_.base.T_B_S.rotation().matrix().cast<float>()),
+  t_B_S_(config_.base.T_B_S.translation().cast<float>()),
+  platform_half_extents_(
+    0.5f *
+    V3F(config_.platform_size.y(), config_.platform_size.x(), config_.platform_size.z()))
 {
   geometric_ = std::make_unique<Geometric>(pnh);
   photometric_ = std::make_unique<Photometric>(pnh);
@@ -320,6 +325,16 @@ void Manager::prepareInput(const sensor_msgs::msg::PointCloud2::ConstSharedPtr m
     // Range filter
     const float range_sq = pin.x * pin.x + pin.y * pin.y + pin.z * pin.z;
     if (range_sq < range_min_sq_ || range_sq > range_max_sq_) continue;
+
+    // Remove returns from the robot itself. Input points are expressed in the sensor frame,
+    // whereas platform.size describes a body-frame box in [width, length, height] order.
+    const V3F p_S(pin.x, pin.y, pin.z + z_offset_);
+    const V3F p_B = R_B_S_ * p_S + t_B_S_;
+    if (
+      platform_half_extents_.minCoeff() > 0.0f &&
+      (p_B.array().abs() <= platform_half_extents_.array()).all()) {
+      continue;
+    }
 
     // Decode time to be nanoseconds since the header timestamp
     uint32_t t_ns;
@@ -667,6 +682,11 @@ void declare_config(ManagerConfig & config)
   // Declare common sensor manager config fields
   declare_sensor_manager_config_base(config.base, "lidar");
 
+  {
+    NameSpace ns("platform");
+    field(config.platform_size, "size", "[width, length, height] in m");
+  }
+
   // Declare lidar-specific fields
   {
     NameSpace ns("lidar");
@@ -699,6 +719,9 @@ void declare_config(ManagerConfig & config)
   check(config.range_max, GT, config.range_min, "range_max");
   check(config.intensity_min, GE, 0.0, "intensity_min");
   check(config.intensity_max, GT, config.intensity_min, "intensity_max");
+  checkCondition(
+    config.platform_size.isZero() || config.platform_size.minCoeff() > 0.0,
+    "platform.size must contain three positive dimensions or be [0, 0, 0] to disable filtering");
 }
 
 }  // namespace lidar

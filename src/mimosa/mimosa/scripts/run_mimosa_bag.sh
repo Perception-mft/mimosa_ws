@@ -14,12 +14,16 @@ factor_graph_state_report.py is run on the new bag.
 
 Defaults:
   MIMOSA profile       m113
+  IMU error model      enabled
+  IMU error profile    MS3025
   RViz visualization  enabled
   simulated time      enabled
   playback clock      enabled
 
 Options:
   --profile NAME          MIMOSA sensor profile (default: m113)
+  --imu-error-model BOOL  Enable/disable the IMU error-model node (default: true)
+  --imu-error-profile NAME  IMU error profile (default: MS3025)
   --viz BOOL              Enable/disable RViz: true or false (default: true)
   --rviz-gpu BOOL         Enable/disable RViz discrete-GPU hints (default: true)
   --config-override FILE  YAML file whose values override the profile config
@@ -63,6 +67,8 @@ normalize_bool() {
 PROFILE=m113
 VIZ=true
 RVIZ_GPU=true
+IMU_ERROR_MODEL=true
+IMU_ERROR_PROFILE=MS3025
 CONFIG_OVERRIDE=
 STARTUP_DELAY=2
 RECORD_DELAY=1
@@ -77,7 +83,7 @@ POSITIONAL=()
 
 while (($#)); do
   case "$1" in
-    --profile|--viz|--rviz-gpu|--config-override|--startup-delay|--record-delay|--rate|--start-offset|--report-output|--launch-arg|--record-arg|--play-arg|--report-arg)
+    --profile|--imu-error-model|--imu-error-profile|--viz|--rviz-gpu|--config-override|--startup-delay|--record-delay|--rate|--start-offset|--report-output|--launch-arg|--record-arg|--play-arg|--report-arg)
       (($# >= 2)) || die "$1 requires a value"
       option=$1
       value=$2
@@ -86,6 +92,8 @@ while (($#)); do
         --profile) PROFILE=$value ;;
         --viz) VIZ=$(normalize_bool "$value") || die "--viz must be true or false" ;;
         --rviz-gpu) RVIZ_GPU=$(normalize_bool "$value") || die "--rviz-gpu must be true or false" ;;
+        --imu-error-model) IMU_ERROR_MODEL=$(normalize_bool "$value") || die "--imu-error-model must be true or false" ;;
+        --imu-error-profile) IMU_ERROR_PROFILE=$value ;;
         --config-override) CONFIG_OVERRIDE=$value ;;
         --startup-delay) STARTUP_DELAY=$value ;;
         --record-delay) RECORD_DELAY=$value ;;
@@ -191,6 +199,8 @@ launch_cmd=(
   "profile:=$PROFILE"
   "viz:=$VIZ"
   "rviz_gpu:=$RVIZ_GPU"
+  "imu_error:=$IMU_ERROR_MODEL"
+  "imu_error_profile:=$IMU_ERROR_PROFILE"
   use_sim_time:=true
 )
 if [[ -n "$CONFIG_OVERRIDE" ]]; then
@@ -198,7 +208,7 @@ if [[ -n "$CONFIG_OVERRIDE" ]]; then
 fi
 launch_cmd+=("${EXTRA_LAUNCH_ARGS[@]}")
 
-echo "Starting MIMOSA (profile=$PROFILE, viz=$VIZ)..."
+echo "Starting MIMOSA (profile=$PROFILE, imu_error_profile=$IMU_ERROR_PROFILE, viz=$VIZ)..."
 setsid "${launch_cmd[@]}" &
 LAUNCH_PID=$!
 sleep "$STARTUP_DELAY"
