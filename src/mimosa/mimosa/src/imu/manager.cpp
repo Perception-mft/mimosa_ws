@@ -408,23 +408,61 @@ void Manager::getInterpolatedMeasurements(
     buffer_.begin(), buffer_.end(), ts_end,
     [](const ImuMeasurement & m, const double ts) { return m.first < ts; });
 
-  // Check if it is first value in the buffer which means there is no value before to interpolate with
+  // s_itr landing exactly on buffer_.begin()/buffer_.end() means the requested ts_start is
+  // slightly outside what's currently buffered. This happens occasionally from real-time
+  // race/latency between the IMU and LiDAR callbacks (confirmed on the BenShemen Hatal dataset:
+  // small, ~8ms over/undershoots with no processing backlog and no actual gap in the IMU data --
+  // see Known Issue #9 in VALIDATION_LOG.md), not a logic error, as long as the gap is small.
+  // Degrade gracefully by extrapolating/holding the nearest available sample within
+  // extrapolation_max_ts_diff -- reusing the same tolerance already used for ts_end's own
+  // extrapolation below -- and only throw if the gap is actually larger than that budget.
   if (s_itr == buffer_.begin()) {
-    logCriticalException<std::runtime_error>(
-      logger_,
-      fmt::format(
-        "IMU lookup requiring first message of the buffer s_itr == buffer_.begin() ts_start: {}, "
-        "s_itr->first: {} . This should never happen. Check the ts that you are querying.",
-        ts_start, s_itr->first));
+    const double ts_diff = buffer_.begin()->first - ts_start;
+    if (ts_diff > config_.extrapolation_max_ts_diff || buffer_.size() < 2) {
+      logCriticalException<std::runtime_error>(
+        logger_,
+        fmt::format(
+          "IMU lookup requiring data {}s before the first message of the buffer (max allowed "
+          "extrapolation_max_ts_diff: {}s). ts_start: {}, buffer's first ts: {}.",
+          ts_diff, config_.extrapolation_max_ts_diff, ts_start, buffer_.begin()->first));
+    }
+    logger_->warn(
+      "IMU lookup {}s before the first buffered message (within extrapolation_max_ts_diff: "
+      "{}s) -- using the first buffered measurement's value instead of throwing. ts_start: {}, "
+      "buffer's first ts: {}.",
+      ts_diff, config_.extrapolation_max_ts_diff, ts_start, buffer_.begin()->first);
+    // Nothing is buffered before ts_start to interpolate with -- hold the earliest available
+    // value instead. The normal "interpolate first element" step below is skipped for this case
+    // (it assumes s_itr != buffer_.begin(), which no longer holds) since this already covers it.
+    measurements.emplace_back(ts_start, buffer_.begin()->second);
   }
 
   if (s_itr == buffer_.end()) {
-    logCriticalException<std::runtime_error>(
-      logger_,
-      fmt::format(
-        "IMU lookup past the end of the buffer s_itr == buffer_.end() ts_start: {}, ts of last "
-        "message in buffer : {} . This should never happen. Check the ts that you are querying.",
-        ts_start, buffer_.rbegin()->first));
+    const double ts_diff = ts_start - buffer_.rbegin()->first;
+    if (ts_diff > config_.extrapolation_max_ts_diff || buffer_.size() < 2) {
+      logCriticalException<std::runtime_error>(
+        logger_,
+        fmt::format(
+          "IMU lookup requiring data {}s past the last message of the buffer (max allowed "
+          "extrapolation_max_ts_diff: {}s). ts_start: {}, buffer's last ts: {}.",
+          ts_diff, config_.extrapolation_max_ts_diff, ts_start, buffer_.rbegin()->first));
+    }
+    logger_->warn(
+      "IMU lookup {}s past the last buffered message (within extrapolation_max_ts_diff: {}s) "
+      "-- extrapolating instead of throwing. ts_start: {}, buffer's last ts: {}.",
+      ts_diff, config_.extrapolation_max_ts_diff, ts_start, buffer_.rbegin()->first);
+    // Nothing is buffered at or after ts_start (or ts_end): extrapolate both from the last two
+    // buffered samples, mirroring how this function already extrapolates past ts_end below when
+    // the buffer hasn't caught up yet. There is nothing else this call needs to do.
+    const auto last_itr = std::prev(buffer_.end());
+    const auto prev_itr = std::prev(last_itr);
+    measurements.emplace_back(
+      ts_start, interpolateMeasurement(
+                  prev_itr->first, prev_itr->second, last_itr->first, last_itr->second, ts_start));
+    measurements.emplace_back(
+      ts_end, interpolateMeasurement(
+                  prev_itr->first, prev_itr->second, last_itr->first, last_itr->second, ts_end));
+    return;
   }
 
   // Check if two IMU messages are different
@@ -440,9 +478,11 @@ void Manager::getInterpolatedMeasurements(
     }
   }
 
-  if (s_itr->first > ts_start) {
+  if (s_itr != buffer_.begin() && s_itr->first > ts_start) {
     // Since s_itr is found with lower_bound, it can only be greater than or equal to
     // ts_start. If it is equal, then the exact value has already been added to the measurements
+    // (the s_itr == buffer_.begin() case is handled, and this ts_start point already added,
+    // above -- skip here to avoid decrementing an already-begin() iterator)
 
     // Interpolate first element
     auto prev_s_itr = s_itr;

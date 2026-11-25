@@ -5,6 +5,7 @@
 
 # Local Python environment
 /.venv/
+/.venv-ouster/
 
 # ROS 2 bag recordings
 /rosbags/

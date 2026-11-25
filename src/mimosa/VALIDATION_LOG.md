@@ -38,6 +38,18 @@ RELLIS-3D has no ground-truth trajectory in this clip, so this is a sanity
 check (does it track roughly the right shape/distance), not an ATE/RPE
 evaluation.
 
+| Sequence (BenShemen Hatal, profile `benshemen`) | Outcome | Notes |
+|---|---|---|
+| Session 1 (`camera_lidar_1`, ~328s) | clean, no crash, but only ~30s of usable trajectory | stationary-init didn't succeed until 298s in (platform-specific, see dataset section) — not a crash or bug, just a very late start. |
+| Session 2 (`camera_lidar_5`, ~632s) | clean, no crash, full sequence | surfaced and fixed a second, independent cause of Known Issue #9's crash signature (a real-time IMU-buffer race, not a backlog) — see Known Issue #9 and the dataset section. No accuracy evaluation against RTK ground truth yet. |
+
+Neither session has been accuracy-evaluated against the RTK ground truth
+yet — see Open Items. This dataset also needed `pose_init_max_gyro_std`/
+`pose_init_max_acc_std` loosened well past every other profile's defaults
+to initialize at all (see the dataset section) — treat early-trajectory
+results with more caution than enwide/rellis for that reason alone, before
+even getting to accuracy.
+
 ## Known Issues
 
 1. **(FIXED on branch `doron_changes`)** `graph::Manager::getStateUptoNoLock`
@@ -111,8 +123,9 @@ evaluation.
    by the graph) or there's a compensating error elsewhere — not changed
    here since it's out of scope for the `rellis` work, but worth a
    deliberate look.
-9. **(Likely a symptom of Known Issue #10, not an independent bug —
-   unreproduced since that fix)** On the full `00002` RELLIS-3D sequence
+9. **(FIXED on branch `doron_changes` — see the "Conversion, Profile, and
+   First Runs" part of the BenShemen Hatal Dataset section for the fix
+   itself)** On the full `00002` RELLIS-3D sequence
    (~415s, vs the 60s demo clip Known Issue #7 was tested against),
    `mimosa_node` crashed (SIGABRT) with an uncaught `std::runtime_error`
    from `imu::Manager::getInterpolatedMeasurements`
@@ -151,17 +164,27 @@ evaluation.
    kind of slow upward per-scan cost over a multi-minute run; once the
    rotation was fixed, ICP converges cheaply throughout and the backlog that
    fed Known Issue #9 never accumulates.
-   **Status**: the crash code path itself
-   (`imu::Manager::getInterpolatedMeasurements`'s uncaught throw) is still
-   present and unguarded in `src/imu/manager.cpp` (unchanged since
-   `9d2a76b`, 2026-11-18) — this was never patched, only worked around by
-   fixing #10 — so it should stay on the radar as a latent robustness gap.
-   But with 2/2 full-length clean runs post-fix and zero full-length clean
-   runs pre-fix, there's no current evidence it's reachable under normal
-   conditions anymore. Treating the three previously-proposed fix options
-   (graceful degradation / bound map-growth cost / document-and-move-on) as
-   deprioritized rather than needing an immediate decision; revisit if a
-   future long run on the corrected config ever reproduces it.
+   **Status, revised again**: the above fully explains RELLIS's specific
+   crash, but the crash code path itself
+   (`imu::Manager::getInterpolatedMeasurements`'s uncaught throw) staying
+   unguarded turned out to matter after all — running mimosa on a third,
+   unrelated dataset (BenShemen Hatal, see that section) reproduced the
+   *same exception* with **no backlog at all** (flat, low per-scan cost the
+   entire time) and **no real IMU data gap**, just a genuine real-time race
+   between the LiDAR and IMU callback threads that's much easier to hit at
+   that dataset's 20Hz LiDAR rate than RELLIS/ENWIDE's 10Hz. So Known Issue
+   #10's fix explains why *RELLIS* stopped backlogging, but there was a
+   second, independent latent bug in the same function that #10 never
+   touched. Fixed properly this time: `getInterpolatedMeasurements` now
+   degrades gracefully (extrapolates/holds the nearest sample) for both of
+   its boundary cases, within the existing `extrapolation_max_ts_diff`
+   budget, instead of throwing — see the BenShemen section for the full
+   fix description and its validation (the new code path was confirmed to
+   actually fire 3429 times on a real re-run of the exact scenario that
+   used to crash, not just reasoned about). Not yet re-tested against
+   RELLIS's own long sequence with this additional fix in place, though no
+   regression is expected (RELLIS's crash was already fully explained by
+   #10 and hadn't reproduced since).
 10. **(FIXED on branch `doron_changes`)** mimosa's `lidar::Manager` applied
     zero rotation when consuming raw Ouster LiDAR points (`T_B_S` rotation
     was identity in both `enwide` and `rellis`), silently assuming the
@@ -387,6 +410,245 @@ no IMU). Use the **"Merged" 60-second example (4.2GB)** instead — it has the
 IMU and the tf-embedded extrinsic calibration used above. All downloads are
 Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
 
+## BenShemen Hatal Dataset
+
+A second, private off-road dataset at `/home/doron-linux/datasets/BenShemen
+Hatal/` (outside this repo/`mimosa_ws` entirely), flagged by the user as
+"unreliable" and reviewed on request. Since the initial raw-data review
+(below), it has been converted to ROS2 bags, given a `benshemen` mimosa
+profile, and run end-to-end on both sessions — see "Conversion, Profile,
+and First Runs" further down for that part; what follows first is the
+original raw-file-level review.
+
+**Format**: not a ROS bag at all. Each of the two recording sessions
+(`1` = `camera_lidar_1`, `2` = `camera_lidar_5`) is a directory of:
+- `lidar_pcap/lidar.pcap` + `lidar_0.json` — raw Ouster UDP capture (not
+  pre-parsed into point clouds) + its metadata JSON. Sensor: Ouster
+  OS-1-64-U02-SR, `lidar_mode: 1024x20` (20Hz, 1024 columns/rotation),
+  `timestamp_mode: TIME_FROM_PTP_1588`, both LiDAR (UDP 7502) and IMU (UDP
+  7503) streams configured and present in the capture.
+- `rgb.mp4` / `ir.mp4` — separate RGB and thermal/IR camera recordings.
+- `rgb_arrival.csv` / `ir_arrival.csv` (+ matching `.log`) — per-frame host
+  arrival timestamp vs. capture timestamp, written by whatever custom
+  capture script produced this dataset (not part of mimosa).
+- `sync_report.txt` — the capture script's own launch/stop event log plus
+  periodic LiDAR PTP-clock-lock status lines.
+- `sync_timestamps.log` — not yet inspected.
+- `bs-1.csv` (session 1) / `bs29-9-5.csv` (session 2) — 1Hz RTK-GNSS survey
+  export (`Status: RTK Fix` throughout, cm-level σN/σE/σZ), presumably the
+  intended ground-truth trajectory. Columns suggest a manually-exported
+  survey-controller log (`VRS Name: R3-VRS` reference station), not an
+  automated per-run artifact from the same capture script as the arrival
+  logs/`sync_report.txt`.
+
+**What's solid** (verified, not just assumed):
+- LiDAR PTP clock reports `LOCKED`/`TIME_FROM_PTP_1588` continuously in
+  both sessions' `sync_report.txt`, sub-10µs RMS jitter throughout, zero
+  unlock events.
+- Zero dropped camera frames in either session: `{rgb,ir}_arrival.csv`'s
+  `frame_index` columns have no gaps, and `ffprobe -count_frames` on the
+  actual `.mp4`s matches the arrival-log row counts exactly (session 1:
+  9831/9831 RGB, 8215/8215 IR; session 2: 18972/18972 RGB, 15823/15823 IR).
+- `lidar_0.json`'s `imu_data_format` field reports
+  `imu_measurements_per_packet: 0` / `imu_packets_per_frame: 0`, which
+  looks alarming (no IMU?) but is misleading — `tcpdump -r lidar.pcap -n
+  udp` on session 1 confirms real UDP traffic on both port 7502 (lidar,
+  ~416k packets sampled) and port 7503 (imu, ~33k packets sampled); this
+  metadata field is just unpopulated in whatever tool wrote this JSON, not
+  evidence IMU data is actually missing.
+
+**Problems found:**
+1. **Session 1's RTK file doesn't cover session 1's actual recording
+   window.** `bs-1.csv` spans 11:41:48-11:47:29 UTC, but per
+   `sync_report.txt` the GPS logging process for this run wasn't launched
+   until 11:41:59.7 and the LiDAR's first real packet is 11:42:03.7 — so
+   roughly the first 16s of `bs-1.csv` predates this recording existing at
+   all. The file also ends ~2.3s before `stop_requested`/the LiDAR's last
+   packet. Session 2's `bs29-9-5.csv` does this correctly (starts 1.2s
+   before first LiDAR packet, ends 3.5s after stop), so this is specific
+   to session 1, not a property of the export format in general. Using
+   `bs-1.csv`'s raw first/last timestamps as "the GPS ground truth for this
+   recording" would silently include pre-recording GPS points — clip to
+   the LiDAR pcap's own `first_packet_epoch`/`last_packet_epoch` (in the
+   same file's own "lidar pcap ground truth" section) before using it.
+2. **`StartLocal time` and `StartUTC` columns are byte-identical** in every
+   row checked of both `bs-*.csv` files, despite Israel being UTC+3 on this
+   date — the "Local" label isn't meaningful here; treat all of this file's
+   timestamps as the UTC value regardless of column name.
+3. **No calibration/extrinsics file anywhere in the dataset.** Unlike
+   RELLIS-3D (extrinsics baked into the bag's own `/tf_static`), there's
+   nothing here documenting LiDAR↔RGB-camera↔IR-camera↔RTK-antenna offsets
+   — only the Ouster's own internal `imu_intrinsics.imu_to_sensor_transform`
+   (lidar↔its embedded IMU only, unrelated to the RTK lever arm).
+4. **RTK ground truth is 1Hz, position-only** (no orientation) — same
+   coarseness/no-orientation caveat already flagged for RELLIS-3D's GPS,
+   compounded here by having no extrinsics to apply a lever-arm correction
+   with at all.
+5. **Real but modest LiDAR UDP packet loss**, confirmed by decoding both
+   pcaps with `ouster-sdk` (`src/mimosa/mimosa/scripts/decode_pcap_drops.py`,
+   raw output in `results/benshemen_hatal/*_pcap_decode.log`):
+
+   | | Session 1 (328s) | Session 2 (633s) |
+   |---|---|---|
+   | Frames decoded / expected (by frame_id span) | 6523 / 6554 | 12622 / 12646 |
+   | Frames fully dropped | 31 (0.47%), 15 gap events | 24 (0.19%), 18 gap events |
+   | Incomplete frames (`scan.complete()==False`) | 59 (0.90%) | 143 (1.13%) |
+   | Bad/missing scan columns | 27168/6679552 (0.41%) | 60048/12924928 (0.46%) |
+   | Packets per complete frame | always exactly 64/64 | always exactly 64/64 |
+
+   Loss is small (well under 1% on every metric) and spread evenly across
+   each recording as scattered small gaps (roughly one every 20-35s), not
+   one large outage — consistent with ordinary UDP buffer overruns on the
+   capture host rather than a sensor fault. When a frame is complete it's
+   always fully intact (64/64 packets), so there's no partial-packet
+   corruption, just occasional whole-packet loss. For context, this is far
+   below the kind of degradation implicated in Known Issue #9 — point loss
+   at this rate should be well within what scan-to-map ICP absorbs.
+
+**Environment note**: `ouster-sdk` (2.0.0) was added to `mimosa_ws/.venv`
+to do the pcap decode above. Its pip dependencies pulled in `rosbags
+0.9.23`, silently downgrading from the `0.11.10` this venv's RELLIS-3D/
+ENWIDE tooling (and `evo`) needs — re-pinned back to `rosbags==0.11.10`
+with `pip install rosbags==0.11.10 --no-deps` immediately after, verified
+both packages import correctly together. **If `ouster-sdk` or anything
+depending on it gets reinstalled/upgraded in this venv, re-check
+`pip show rosbags` afterward** — it may silently downgrade again.
+
+### Conversion, Profile, and First Runs
+
+**Converting the raw pcap to a ROS2 bag**: `ouster-cli source <pcap> save
+<out>.bag --ros2` (ouster-sdk's own built-in command for exactly this) is
+the wrong tool here — it only writes *raw, undecoded* packet topics
+(`ouster_sensor_msgs/msg/PacketMsg` on `/ouster/lidar_packets` etc.,
+IMU packets came back empty too, "Saving bag without save_raw will not
+save LEGACY IMU packets"), meant to be replayed through the real
+`ouster_ros` ROS2 driver nodes to get decoded clouds — which don't exist in
+this workspace. It also outright crashed when tried in this venv
+(`rosbags==0.11.10`'s `Writer()` needs a `version` kwarg that ouster-sdk's
+bundled CLI code, written against `rosbags==0.9.23`, doesn't pass).
+
+Instead wrote a one-off converter,
+`src/mimosa/mimosa/scripts/convert_benshemen_pcap.py`: uses `ouster-sdk`'s
+Python API (`open_source()` for frame-batched `LidarScan`s + `XYZLut` for
+XYZ, `PcapPacketSource` filtered to `ImuPacket` for IMU) to build
+`sensor_msgs/PointCloud2`/`Imu` messages matching the *exact* byte layout
+mimosa already consumes from the enwide/rellis bags (same 48-byte point
+struct: x,y,z,intensity,t,reflectivity,ring,noise,range — reverse-derived
+from a real message in the existing RELLIS bag rather than guessed), and
+writes them with the `rosbags` library directly — no `ouster-cli`/raw-packet
+detour, so it runs fine in the main `.venv` despite the rosbags version
+conflict above. One real bug caught before trusting the output: the first
+frame decoded is a genuinely incomplete frame (expected — capture starts
+mid-rotation) whose first *columns* have `timestamp==0`/`status==0`
+(never received); naively using column 0's timestamp as the frame's
+reference time produced a frame with `t` fields corrupted by ~2 billion ns
+and, worse, corrupted the whole bag's reported start time (`ros2 bag info`
+showed `Start: Jan 1 1970`). Fixed by anchoring on the first column where
+`status != 0` instead of raw index 0. Verified post-fix: frame/IMU counts
+match the earlier pcap-drop-decode exactly (session 1: 6523 LiDAR + 32765
+IMU; session 2: 12622 LiDAR + 63222 IMU), `ros2 bag info` reports correct
+start/end/duration, and per-point data (coordinate ranges, ~58% valid
+return rate, 50ms/20Hz frame spacing) all look like real outdoor LiDAR
+data, not corrupted output. Resulting bags:
+`/home/doron-linux/datasets/BenShemen Hatal/{1,2}/ros2/camera_lidar_{1,5}_ros2`.
+
+**`benshemen` profile** (`src/mimosa/mimosa/config/benshemen/params.yaml`,
+`os_benshemen.json` copied from the dataset's own `lidar_0.json`, wired
+into `mimosa.launch.py`'s `PROFILES`): Ouster-internal-IMU-only, same
+pattern as `enwide`/`rellis`. `T_B_S` derived straight from this sensor's
+own metadata matrices (`lidar_to_sensor_transform`,
+`imu_intrinsics.imu_to_sensor_transform`) using the same
+translation-composition formula as rellis/enwide — and verified by
+reproducing `rellis`'s own already-known-correct `T_B_S` value exactly
+from that formula before trusting it here — giving rotation 180°-about-Z
+(the Known Issue #10 pattern, not left as identity this time) and
+translation `(0.002441, 0.009725, 0.030662)` m. Both sessions share
+identical sensor metadata (same physical unit, serial 122541002747), so
+one derivation covers both.
+
+**Stationary-init is a real blocker here, independent of anything else.**
+Before running mimosa at all, scanned the *entire* IMU stream of both
+sessions in 1s sliding windows using mimosa's own stationarity formula
+(`imu::Manager`'s combined accel/gyro RMS over the window, not a per-axis
+std) against the default thresholds (`pose_init_max_gyro_std: 0.02 rad/s`,
+`pose_init_max_acc_std: 0.2 m/s²`): **zero windows pass in either session**
+(0/654 and 0/1263). Best achievable anywhere: acc_std≈0.99 m/s²,
+gyro_std≈0.051 rad/s — both ~2-5x over threshold, in both independent
+recordings alike (same floor in each), while `gyro_mean`/`gravity_error`
+stay comfortably within their own defaults throughout — i.e. the rig is
+never rotating or falling, just persistently vibrating (mounting/platform
+vibration, not a one-off). Left alone, mimosa would run with zero crashes
+and silently produce an empty trajectory, same as ENWIDE's `tunnel_d`
+(Known Issue #6), and it would look like a mystery rather than this
+specific, measured cause. Loosened `pose_init_max_gyro_std` to `0.08` and
+`pose_init_max_acc_std` to `1.1` (margin above the measured floor;
+`gyro_mean`/`gravity_error` left at defaults since those were never the
+problem) in the `benshemen` profile.
+
+**First runs, pre-fix: a new crash, different from Known Issue #9.**
+Session 2 crashed ~145s in; session 1 crashed ~25s in. Same exception as
+#9 (`imu::Manager::getInterpolatedMeasurements`,
+`std::runtime_error`/SIGABRT) but the *opposite* boundary —
+`"IMU lookup past the end of the buffer"` (requested timestamp newer than
+anything buffered yet) rather than `"...requiring first message..."`
+(requested timestamp aged out of the buffer, #9's original signature) —
+and critically, **with no backlog at all**: per-scan processing time was
+flat and low the entire time in both runs (session 1: mean 12.94ms, max
+32.48ms), ruling out #9's "map-growth slows ICP until it falls behind"
+mechanism entirely. Also checked for a real IMU data gap at the exact
+crash timestamp (given this dataset's own confirmed packet loss) and found
+none — normal ~10ms spacing right through it, zero gaps >20ms anywhere in
+either session's IMU stream. So this is a genuine real-time *race*
+(mimosa runs a `MultiThreadedExecutor`; the LiDAR deskew step read the IMU
+buffer a few ms before the IMU callback for that same instant had
+appended), not a data-quality or backlog issue — one that's much easier to
+hit at BenShemen's 20Hz LiDAR rate (5 IMU samples/scan at 100Hz) than
+RELLIS/ENWIDE's 10Hz (10 samples/scan). This means the earlier "Known
+Issue #9 is likely just a symptom of #10" conclusion was too narrow: #10's
+fix explains why RELLIS stopped backlogging, but this shows the
+`imu::Manager` buffer-lookup code has a genuine, independent latent race
+that given tight enough real-time margins, bites even when IMU data is
+fully intact and processing cost is nowhere near the budget.
+
+**Fix (this session, on `doron_changes`)**: `getInterpolatedMeasurements`
+(`src/mimosa/mimosa/src/imu/manager.cpp`) now degrades gracefully instead
+of throwing for *both* boundary cases (`s_itr == buffer_.begin()`, #9's
+original signature, and `s_itr == buffer_.end()`, this session's new one)
+as long as the gap is within the already-existing
+`extrapolation_max_ts_diff` budget (same tolerance already used elsewhere
+in this function for extrapolating past `ts_end`) — holding/extrapolating
+from the nearest available sample instead of crashing, and still throwing
+if the gap is actually larger than that budget (the original safety net
+stays intact for genuinely bad queries). Mirrors the leniency pattern
+already used for Known Issue #1.
+
+**Verified the fix against the actual failure, not just logically**:
+re-ran both sessions post-fix/post-rebuild.
+- Session 1: completed to the end with zero crashes
+  (`results/benshemen_hatal/camera_lidar_1_run2_launch.log`) — though the
+  new graceful-degrade path never actually fired this run (0 occurrences),
+  consistent with the race being scheduling-dependent/non-deterministic,
+  so this run alone doesn't exercise the fix. Separately found
+  initialization didn't succeed until **298s into the 328s recording**
+  (only ~30s/491 scans actually processed) — not a bug, just this
+  session's low-vibration windows being much rarer/later than session 2's;
+  worth knowing before reading anything into session 1's (very short)
+  trajectory.
+- Session 2: completed to the end with zero crashes
+  (`results/benshemen_hatal/camera_lidar_5_run2_launch.log`), reaching the
+  exact final bag timestamp, 11070 scans processed (mean 18.11ms, max
+  164.28ms — the max is notably higher than any RELLIS run but isolated,
+  not a climbing trend). **The graceful-degrade path fired 3429 times
+  across the run**, each time the same ~8ms-past-the-buffer pattern as the
+  original crash, each time absorbed instead of crashing — this is the
+  real validation: the fix was exercised against the actual bug, not just
+  theoretically sound. Initialization succeeded ~7.5s in.
+
+**Status**: both sessions now run mimosa end-to-end without crashing.
+Accuracy/trajectory quality against the RTK ground truth has not been
+evaluated yet (see Open Items) — getting a clean run was the goal this
+session, not validation numbers.
+
 ## Open Items
 
 - [ ] Investigate `rellis`'s excess path length vs wheel odometry (83.7m vs
@@ -404,11 +666,21 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
 - [ ] Resolve Known Issue #2 (degeneracy protection off) before trusting
       results on degenerate sequences.
 - [ ] Resolve Known Issue #3 (`integration_sigma: 0`).
-- [ ] Known Issue #9 is deprioritized (now believed to be a downstream
-      symptom of #10, unreproduced in 2/2 post-fix full runs) but its crash
-      code path (`imu::Manager::getInterpolatedMeasurements`'s uncaught
-      throw) is still unguarded — revisit if it ever reproduces again on
-      the corrected config.
+- [x] ~~Known Issue #9's crash code path
+      (`imu::Manager::getInterpolatedMeasurements`'s uncaught throw) is
+      still unguarded.~~ Fixed — see Known Issue #9 and the BenShemen Hatal
+      Dataset section's "Conversion, Profile, and First Runs" part.
+- [ ] Re-run RELLIS-3D's full `00002` sequence with the new
+      `getInterpolatedMeasurements` fix in place, just to confirm no
+      regression (not expected — RELLIS's crash was already fully
+      explained by #10 and hadn't reproduced since that fix).
+- [ ] Evaluate BenShemen Hatal's trajectory quality against its RTK ground
+      truth, now that both sessions run end-to-end without crashing —
+      needs session 1's GPS-window clipping fix from the dataset-review
+      part of that section first, and there's no documented
+      GNSS-antenna-to-LiDAR lever arm to correct for (unlike RELLIS-3D).
+      Session 1 only has ~30s of usable trajectory (late init, see that
+      section) so session 2 is the better candidate.
 - [ ] Compute a real alignment (evo-style, like ENWIDE) between the RELLIS
       GPS ground-truth path and mimosa's estimated trajectory
       (`results/rellis_00002_run4_estimate.tum` exists now) for a real
@@ -427,6 +699,10 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
 - [ ] `scripts/dataset_evaluation.py` / `evaluate.sh` need rewriting (paths,
       stale log reference, RPE pose_relation) if they're meant to be used
       again rather than superseded by ad hoc runs like this one.
+- [ ] BenShemen Hatal dataset (see its own section above) has no ROS2 bag
+      or mimosa profile yet — only reviewed at the raw-file level so far.
+      Converting `lidar.pcap`+IMU to a bag and building a profile is the
+      next step if it's worth validating against.
 
 ## Session Log
 
@@ -613,3 +889,48 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
   Deleted the two originals after verification, on explicit user
   confirmation. Merge script was scratchpad-only, not added to
   `scripts/` (one-off consolidation, not expected to be needed again).
+
+### 2026-11-25 (continued) — BenShemen Hatal: conversion, profile, crash, fix
+- User asked to actually run mimosa on the BenShemen Hatal dataset
+  reviewed earlier this session. Converted both sessions' raw pcaps to
+  ROS2 bags with a new one-off script
+  (`scripts/convert_benshemen_pcap.py`, using `ouster-sdk`'s Python API
+  directly rather than its own broken/wrong-format `--ros2` CLI export —
+  see the dataset section for why), after catching and fixing a bug in the
+  converter itself (the first, genuinely-incomplete frame's invalid
+  columns were corrupting the whole bag's timestamps — see that section).
+  Built a new `benshemen` profile with `T_B_S` derived from this sensor's
+  own metadata (verified by reproducing `rellis`'s known-correct value
+  from the same formula first).
+- Before running anything, checked whether either session has a
+  stationary window at all (needed for mimosa to initialize) — scanned the
+  full IMU stream of both sessions and found zero windows pass the default
+  thresholds in either one. Loosened `pose_init_max_gyro_std`/
+  `pose_init_max_acc_std` in the new profile to the minimum needed, with
+  margin, after confirming `gyro_mean`/`gravity_error` stayed normal
+  throughout (i.e. the rig is genuinely just vibrating, not rotating or
+  falling, so loosening these specific two thresholds doesn't paper over
+  real motion).
+- Both sessions crashed on the first real run — same exception as Known
+  Issue #9, but the opposite boundary condition, and with neither a
+  processing backlog nor an actual IMU data gap at the crash point (ruled
+  both out explicitly before concluding this is a new, genuine race in
+  `imu::Manager`, not a recurrence of #9's already-understood mechanism).
+  This revises the "Known Issue #9 was just a symptom of #10" conclusion
+  from earlier this session — see Known Issue #9's latest update.
+- Fixed `imu::Manager::getInterpolatedMeasurements` to degrade gracefully
+  for both of its boundary cases instead of throwing, reusing the
+  existing `extrapolation_max_ts_diff` budget rather than adding new
+  config surface. Rebuilt, re-ran both sessions: zero crashes in either,
+  and confirmed the new code path was actually exercised (not just
+  theoretically correct) — it fired 3429 times on session 2, the same
+  session that crashed before, each time on the same ~8ms pattern as the
+  original crash.
+- Also found, incidentally, that session 1 doesn't find a usable
+  stationary window until 298s into its 328s recording — not a bug, just
+  worth knowing before reading anything into that session's (very short)
+  resulting trajectory.
+- Updated `VALIDATION_LOG.md`: Known Issue #9 updated again (now actually
+  fixed, not just deprioritized), Current Status table gained a BenShemen
+  row, new "Conversion, Profile, and First Runs" part added to the
+  BenShemen Hatal Dataset section, Open Items updated.
