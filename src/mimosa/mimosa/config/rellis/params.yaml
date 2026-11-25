@@ -9,16 +9,17 @@
 # UNVALIDATED / TODO before trusting results from this profile:
 #   - T_B_S below is derived from the "Merged" bag's /tf_static
 #     (ouster1/os1_sensor -> ouster1/os1_imu, ouster1/os1_sensor ->
-#     ouster1/os1_lidar), composed with identity rotation to match mimosa's
-#     existing `enwide` convention (mimosa's lidar::Manager only consumes a
-#     per-point z_offset from the Ouster metadata JSON's
-#     lidar_to_sensor_transform -- see src/lidar/manager.cpp:18 -- it does
-#     not apply any extrinsic rotation itself, so T_B_S rotation should stay
-#     identity here just like enwide's, even though this bag's /tf_static
-#     reports a 180deg-about-Z rotation between os1_sensor and os1_lidar).
-#     Translation = sensor-to-imu offset (0.006253, -0.011775, 0.007645 m,
-#     negated) stacked with the lidar-to-sensor z offset (0.03618 m) to land
-#     in the same frame mimosa's point-publishing code produces.
+#     ouster1/os1_lidar). Translation = sensor-to-imu offset
+#     (0.006253, -0.011775, 0.007645 m, negated) stacked with the
+#     lidar-to-sensor z offset (0.03618 m). Rotation is 180deg about Z
+#     (os1_sensor -> os1_lidar per /tf_static, matching the rotation
+#     sub-matrix of the Ouster metadata's own lidar_to_sensor_transform,
+#     which mimosa's lidar::Manager otherwise discards -- see
+#     src/lidar/manager.cpp:18 and Known Issue #10 in VALIDATION_LOG.md).
+#     This used to be left as identity, which silently applied a constant
+#     180deg heading bias to the whole output -- confirmed wrong by
+#     comparing against the dataset's own GPS ground truth (see
+#     VALIDATION_LOG.md), now corrected.
 #     NOTE: while deriving this, enwide's own committed T_B_S z component
 #     (0.0028525) looks like it may be off by a factor of 10 from the same
 #     arithmetic (0.028525 expected) -- flagged in VALIDATION_LOG.md as an
@@ -96,7 +97,7 @@ graph:
 lidar:
   topic: /os1_cloud_node/points
   sensor_frame: mimosa_lidar
-  T_B_S: [-0.006253, 0.011775, 0.028535, 0, 0, 0, 1] # x, y, z, x, y, z, w -- derived from bag tf, see header note
+  T_B_S: [-0.006253, 0.011775, 0.028535, 0, 0, 1, 0] # x, y, z, x, y, z, w -- derived from bag tf, see header note; rotation is 180deg about Z (os1_sensor->os1_lidar per the Ouster lidar_to_sensor_transform), see Known Issue #10
   T_B_OdometryLoggerFrame: [0, 0, 0, 0, 0, 0, 1] # x, y, z, x, y, z, w
   manager:
     log_level: trace

@@ -32,7 +32,7 @@ anything about mimosa's degeneracy handling from these two results.
 | Sequence (RELLIS-3D, profile `rellis`) | Outcome | Notes |
 |---|---|---|
 | `example_merged` (60s "Merged" example) | clean run, no crash | net displacement 54.5m vs wheel-odom's 51.8m (~5% off); but mimosa's total path length (83.7m) is ~50% longer than wheel odom's (56.2m) — see RELLIS-3D section below for interpretation. |
-| `00002` full sequence (~415s, `20200215_hill_1.bag`) | **crashes partway through** on Known Issue #9 | reproducible across 3 runs, crash point varies (~207-365s) — real-time backlog, not a fixed bug location; screen recording of a run up to the crash is at `results/rellis_00002_run_20261125_085311.mp4`. GPS ground-truth path (no curated GT exists) extracted and plotted — see Visualization section. |
+| `00002` full sequence (~415s, `20200215_hill_1.bag`) | **clean on every run since the Known Issue #10 fix** (2/2 full-length completions, flat ≤27ms per-scan cost); all pre-fix crashes now suspected to be a symptom of #10, not an independent bug | screen recording of a pre-fix crashing run is at `results/rellis_00002_run_20261125_085311.mp4`; post-fix full clean run at `results/rellis_00002_run_20261125_105711.mp4`. GPS ground-truth path (no curated GT exists) extracted, plotted, and overlaid in RViz — see Visualization section. Also surfaced and fixed Known Issue #10 (180° heading bug); post-fix heading matches GPS within 3-7°, distance within ~2-5% (`results/rellis_00002_run4_estimate.tum`). |
 
 RELLIS-3D has no ground-truth trajectory in this clip, so this is a sanity
 check (does it track roughly the right shape/distance), not an ATE/RPE
@@ -111,29 +111,93 @@ evaluation.
    by the graph) or there's a compensating error elsewhere — not changed
    here since it's out of scope for the `rellis` work, but worth a
    deliberate look.
-9. **(Open)** On the full `00002` RELLIS-3D sequence (~415s, vs the 60s
-   demo clip Known Issue #7 was tested against), `mimosa_node` crashes
-   (SIGABRT) with an uncaught `std::runtime_error` from
-   `imu::Manager::getInterpolatedMeasurements` (`src/imu/manager.cpp:412`,
-   "IMU lookup requiring first message of the buffer ... This should never
-   happen"). Root cause: per-scan LiDAR processing time climbs steadily
-   over the run (from ~10-20ms early on to 100-330ms later), eventually
-   exceeding the 10Hz scan arrival rate and the `rellis` profile's
-   `max_buffer_duration: 1.1s` IMU rolling-buffer window — a real-time
-   backlog, not a one-off timestamp bug. Confirmed across three separate
-   runs with the crash landing at a different point each time (~207s, then
-   ~344s and ~365s in two runs done while also screen-recording the RViz
-   window, which adds CPU contention and plausibly shifts when the backlog
-   crosses the threshold) — consistent with a resource-accumulation crash
-   rather than a fixed repro timestamp. Most likely driver: the local
-   scan-to-map voxel structure growing unbounded as the vehicle covers real
-   outdoor terrain over several minutes (the 60s clip never ran long enough
-   for this to matter). Three non-exclusive fix options proposed, not yet
-   decided: (1) make `getInterpolatedMeasurements` degrade gracefully
-   instead of throwing, mirroring Known Issue #1's pattern; (2) tune
-   `lidar.geometric`'s map-growth settings (`lru_horizon`, voxel leaf
-   sizes, `point_skip_divisor`) to bound per-scan cost on long sequences;
-   (3) just document as a known limitation and move on. See Open Items.
+9. **(Likely a symptom of Known Issue #10, not an independent bug —
+   unreproduced since that fix)** On the full `00002` RELLIS-3D sequence
+   (~415s, vs the 60s demo clip Known Issue #7 was tested against),
+   `mimosa_node` crashed (SIGABRT) with an uncaught `std::runtime_error`
+   from `imu::Manager::getInterpolatedMeasurements`
+   (`src/imu/manager.cpp:412`, "IMU lookup requiring first message of the
+   buffer ... This should never happen"). Proximate mechanism: per-scan
+   LiDAR processing time climbed steadily over the run (from ~10-20ms early
+   on to 100-330ms later), eventually exceeding the 10Hz scan arrival rate
+   and the `rellis` profile's `max_buffer_duration: 1.1s` IMU rolling-buffer
+   window — a real-time backlog, not a one-off timestamp bug. Confirmed
+   across three separate runs with the crash landing at a different point
+   each time (~207s, then ~344s and ~365s in two runs done while also
+   screen-recording the RViz window, which adds CPU contention) —
+   consistent with a resource-accumulation crash rather than a fixed repro
+   timestamp. Originally suspected driver: the local scan-to-map voxel
+   structure growing unbounded as the vehicle covers real outdoor terrain
+   over several minutes (the 60s clip never ran long enough for this to
+   matter).
+   **Update — root cause revised**: all runs that exhibited the climbing
+   processing-time trend and/or crashed were run with the *pre-fix* broken
+   `T_B_S` rotation (Known Issue #10, identity instead of 180°-about-Z).
+   Checked every full-length attempt by comparing each config file's mtime
+   against each run's launch timestamp: `run2` (09:47:58) and `run3`
+   (10:07:25) both predate the #10 fix (applied 10:27:37/10:27:56) and
+   neither reached the end of the bag; `run4` (10:28:27) and a later run
+   (10:57:11) both postdate the fix and both completed the *entire* 415s
+   sequence cleanly, reaching the identical final bag timestamp
+   (`1581797565.14`) with "process has finished cleanly." Per-scan
+   processing time in both post-fix full runs is flat and bounded for the
+   whole run — `run4`: 3464 scans, mean 8.67ms, max 24.85ms, 0 scans over
+   100ms; the later run: 3135 scans, mean 9.26ms, max 27.09ms, 0 scans over
+   100ms (`results/rellis_00002_run4_launch.log`,
+   `results/rellis_00002_run_launch.log`) — no trace of the previous
+   climbing-backlog pattern at all. Likely mechanism: with the point cloud
+   180° misrotated relative to the growing map, scan-to-map ICP had to work
+   harder (worse convergence) as the map grew, which produces exactly this
+   kind of slow upward per-scan cost over a multi-minute run; once the
+   rotation was fixed, ICP converges cheaply throughout and the backlog that
+   fed Known Issue #9 never accumulates.
+   **Status**: the crash code path itself
+   (`imu::Manager::getInterpolatedMeasurements`'s uncaught throw) is still
+   present and unguarded in `src/imu/manager.cpp` (unchanged since
+   `9d2a76b`, 2026-11-18) — this was never patched, only worked around by
+   fixing #10 — so it should stay on the radar as a latent robustness gap.
+   But with 2/2 full-length clean runs post-fix and zero full-length clean
+   runs pre-fix, there's no current evidence it's reachable under normal
+   conditions anymore. Treating the three previously-proposed fix options
+   (graceful degradation / bound map-growth cost / document-and-move-on) as
+   deprioritized rather than needing an immediate decision; revisit if a
+   future long run on the corrected config ever reproduces it.
+10. **(FIXED on branch `doron_changes`)** mimosa's `lidar::Manager` applied
+    zero rotation when consuming raw Ouster LiDAR points (`T_B_S` rotation
+    was identity in both `enwide` and `rellis`), silently assuming the
+    points already shared the body/IMU frame's axes. They don't: the
+    Ouster's `lidar_to_sensor_transform` metadata (present in both
+    `enwide/os_enwide.json` and the generic `os_dummy.json` `rellis` uses —
+    a fixed Ouster firmware constant, not per-sensor) encodes a 180°-about-Z
+    rotation between the `os_lidar` frame points are published in and the
+    `os_sensor`/`os_imu` frame mimosa treats as the body frame
+    (`src/lidar/manager.cpp:18` only ever extracted the z-translation
+    component of this matrix, discarding the rotation). Independently
+    confirmed via the RELLIS bag's own `/tf_static`
+    (`os1_sensor -> os1_lidar` = 180° about Z) and the point cloud's own
+    `header.frame_id` (`ouster1/os1_lidar`, not `os1_sensor`). Effect: a
+    constant 180° heading bias on the entire estimated trajectory/map —
+    self-consistent internally (ICP/odometry still converge fine within the
+    rotated frame), so it was invisible to ENWIDE's `evo_ape -a` evaluation
+    (Umeyama alignment silently absorbs a constant rotation offset before
+    computing ATE) but directly visible once the unaligned RELLIS GPS
+    overlay was compared against a live run — this is how it was found.
+    **Fix**: changed `T_B_S`'s rotation quaternion from identity to
+    `(0,0,1,0)` (180° about Z) in both `rellis/params.yaml` and
+    `enwide/params.yaml`; the existing translation component needed no
+    change (verified by composing the tf chain explicitly — the
+    `imu↔sensor` leg has identity rotation, so translations combine by
+    simple addition independent of this rotation). Config-only fix, no
+    rebuild needed (`--symlink-install`). **Verified**: comparing mimosa's
+    post-fix estimated trajectory (`results/rellis_00002_run4_estimate.tum`)
+    against the GPS ground truth, heading now matches within 3-7° (was
+    ~180° before) and distances match within ~2-5%, at multiple intervals
+    (first 20s, first 60s, full run) — see Visualization section.
+    `T_B_OdometryLoggerFrame` (a separate, purpose-built output-logging
+    transform, unrelated to point consumption) was deliberately left
+    untouched. Not checked: whether `hornbill`/`magpie`/`parrot`/`lapwing`
+    (other Ouster-based profiles, per their own metadata) have the same
+    bug — out of scope this session.
 
 ## Evaluation Methodology Notes
 
@@ -224,17 +288,18 @@ nearest-in-time `/vectornav/Odom` orientation (GPS itself has no
 orientation), producing `results/rellis_00002_gps_realtime.csv` (columns:
 `t_abs,x,y,z`, absolute epoch matching LiDAR/IMU header stamps).
 
-**No heading/yaw alignment is applied, and this is a bigger caveat than the
-lever arm above** — there's no Umeyama transform to invert (unlike ENWIDE)
-because there's no mimosa trajectory run yet to align against, and no
-independent heading reference was used (the VN-300's own fused heading in
-`/vectornav/Odom` could arguably serve as one, but hasn't been). The GPS
-path is anchored at the same origin convention as mimosa's own start pose
-(both ≈ (0,0,0)) but its X/Y axes are true East/North, while `mimosa_map`'s
-are whatever the vehicle was heading at t=0 — so position/shape/scale are
-comparable, but the whole GPS path may appear rotated relative to mimosa's
-estimated path until a real alignment is computed (e.g. via `evo` once both
-trajectories exist in TUM format, same as the ENWIDE workflow).
+**Update: the large heading mismatch this caveat originally warned about
+was real, but it was mimosa's bug, not a missing alignment step.** Comparing
+this unaligned overlay against a live run is exactly what surfaced Known
+Issue #10 (the LiDAR 180°-about-Z rotation bug) — the GPS path appeared
+rotated ~180° from mimosa's estimate. After that fix, heading now matches
+within 3-7° with no alignment applied at all (see Known Issue #10's
+verification numbers). A residual few-degrees offset and the lever-arm
+approximation above are the only remaining caveats; a real Umeyama-style
+alignment (via `evo`, same as ENWIDE) would still be the right way to get
+an actual ATE/RPE number rather than eyeballing/diffing headings, but it's
+no longer hiding a gross error the way it did before Known Issue #10 was
+found.
 
 **Realtime (sim-time-synced) playback**: `tum_path_publisher.py` dumps the
 whole static path at a fixed wall-clock rate, which doesn't grow alongside
@@ -337,13 +402,21 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
 - [ ] Resolve Known Issue #2 (degeneracy protection off) before trusting
       results on degenerate sequences.
 - [ ] Resolve Known Issue #3 (`integration_sigma: 0`).
-- [ ] Decide on a fix for Known Issue #9 (long-sequence IMU-buffer crash on
-      RELLIS-3D `00002`) — band-aid graceful degradation, bound map-growth
-      cost, or document-and-move-on.
+- [ ] Known Issue #9 is deprioritized (now believed to be a downstream
+      symptom of #10, unreproduced in 2/2 post-fix full runs) but its crash
+      code path (`imu::Manager::getInterpolatedMeasurements`'s uncaught
+      throw) is still unguarded — revisit if it ever reproduces again on
+      the corrected config.
 - [ ] Compute a real alignment (evo-style, like ENWIDE) between the RELLIS
-      GPS ground-truth path and mimosa's estimated trajectory once a run
-      exists to align against — current overlay has no heading alignment
-      (see Visualization section).
+      GPS ground-truth path and mimosa's estimated trajectory
+      (`results/rellis_00002_run4_estimate.tum` exists now) for a real
+      ATE/RPE number — the gross heading mismatch that made this seem more
+      urgent turned out to be Known Issue #10 (now fixed); what's left is
+      upgrading from a 3-7°-heading / ~2-5%-distance eyeball check to a
+      proper aligned metric.
+- [ ] Check whether `hornbill`/`magpie`/`parrot`/`lapwing` (other
+      Ouster-based profiles) have the same Known Issue #10 rotation bug —
+      not checked this session, out of scope.
 - [x] ~~Decide whether the GT-overlay RViz tooling is worth productizing
       into `scripts/`.~~ Reused as-is for RELLIS-3D (second dataset) via
       the existing `tum_path_publisher.py` + a one-off TUM export — no new
@@ -457,3 +530,53 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
   static full-path dump), since the user wanted the GPS path published in
   realtime rather than all at once. Verified it grows correctly against a
   10x-speed bag replay before handing back.
+- Committed the above (`VALIDATION_LOG.md` + `sim_time_path_publisher.py`
+  only — not `datasets/`, `results/`, or unrelated pre-existing untracked
+  IDE files) on explicit request.
+- User watched a live `viz:=true` run with the GPS overlay and reported the
+  GPS ground-truth path looked ~180° off in heading from mimosa's own
+  estimate. Investigated rather than assuming it was the GPS pipeline's own
+  bug: confirmed via three independent sources (the bag's `/tf_static`, the
+  point cloud's own `header.frame_id = ouster1/os1_lidar`, and the Ouster
+  `lidar_to_sensor_transform` matrix in both `os_dummy.json` and
+  `os_enwide.json`) that this is Known Issue #10 — see Known Issues. Fixed
+  by correcting `T_B_S`'s rotation (identity → 180° about Z) in both
+  `rellis/params.yaml` and `enwide/params.yaml`; no code change, no rebuild
+  needed (symlinked configs).
+- Verification run hit a real RViz hang (confirmed via the window manager's
+  own "not responding" dialog, not just a quiet-looking view) — killed the
+  stuck `rviz2` process and relaunched a fresh instance against the same
+  live topics without disturbing `mimosa_node`/bag playback underneath.
+  Screenshots alone proved unreliable for judging heading (default camera
+  zoomed too close to the point cloud to see the overall path shape, and
+  one capture caught the user's unrelated browser window covering RViz).
+  Switched to a numeric check instead: this run completed the full 415s
+  sequence cleanly (no Known Issue #9 crash this time — see that issue's
+  update), so compared mimosa's persisted TUM log
+  (`results/rellis_00002_run4_estimate.tum`) against the GPS ground truth
+  directly — heading within 3-7°, distance within ~2-5%, confirming the fix
+  (see Known Issue #10 and the Visualization section update).
+
+### 2026-11-25 (continued) — Known Issue #9 reclassified as a symptom of #10
+- Session was interrupted by an ungraceful machine reboot; resumed by
+  reading this log, `git status`/`git log`, and the `results/` directory
+  rather than re-asking the user what had happened. Found three ROS nodes
+  (a one-off `gated_pointcloud_relay.py` script, RViz, and
+  `sim_time_path_publisher.py`) that had all died simultaneously with
+  `ExternalShutdownException`/context-invalid errors at the same wall-clock
+  moment — consistent with the reboot killing the ROS graph mid-session,
+  not a code bug. That in-progress recording attempt produced no output
+  file and its script lived in a since-deleted scratchpad; not resumed.
+- User raised the hypothesis that Known Issue #9's crash may have been
+  *caused* by Known Issue #10's bad rotation rather than being an
+  independent bug, and asked to re-verify #9 without rolling back the #10
+  fix. Checked config file mtimes against each run's launch-log start
+  timestamp to confirm which runs actually used the corrected rotation
+  (see Known Issue #9's "Update — root cause revised"): two full-length
+  post-fix runs existed already (`run4` and a later run, both never rolled
+  back), both completed the entire sequence cleanly with flat per-scan
+  processing time, vs. zero full-length clean completions on the old,
+  broken rotation. Updated Known Issue #9, the Current Status table, and
+  Open Items accordingly — reclassified from "open bug needing a fix
+  decision" to "likely a downstream symptom of #10, unreproduced since the
+  fix, crash code path still unguarded but deprioritized."
