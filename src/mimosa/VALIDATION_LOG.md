@@ -268,7 +268,9 @@ result. Source: `/vectornav/GPS` (`sensor_msgs/NavSatFix`), extracted from
 the original ROS1 bag (`rosbags-convert --include-topic /vectornav/GPS
 --include-topic /vectornav/Odom`, since the main `rellis` conversion
 deliberately dropped these — see RELLIS-3D Profile section) into
-`datasets/rellis/00002_hill_1_gps_ros2`. Lat/lon converted to a local ENU
+`00002_hill_1_gps_ros2` (path moved 2026-11-25, see Session Log — now
+under `/home/doron-linux/datasets/Rellis/ros2/`, outside the repo). Lat/lon
+converted to a local ENU
 tangent plane anchored at the first fix (flat-earth approximation, fine at
 this ~100m scale). A static 3D plot of this same GPS trajectory (colored by
 elapsed time) is at `results/rellis_00002_gps_trajectory_3d.png`, with the
@@ -580,3 +582,34 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
   Open Items accordingly — reclassified from "open bug needing a fix
   decision" to "likely a downstream symptom of #10, unreproduced since the
   fix, crash code path still unguarded but deprioritized."
+
+### 2026-11-25 (continued) — Dataset relocated out of the repo working tree
+- User moved the raw ROS1 RELLIS-3D bags from `~/Downloads/Rellis/` to
+  `/home/doron-linux/datasets/Rellis/` (`00002_20210224/20200215_hill_1.bag`,
+  `example_merged.bag/example_filtered.bag`), then moved the converted
+  ROS2 bags from the in-repo `datasets/rellis/` out to
+  `/home/doron-linux/datasets/Rellis/ros2/` as well (`00002_hill_1_ros2`,
+  `00002_hill_1_gps_ros2`, `example_merged_ros2`). The in-repo
+  `datasets/rellis/` directory is now empty; nothing in `params.yaml` or
+  the launch files referenced these paths directly (bag paths are always
+  passed at runtime via `bag_name:=`), so this is a pure data move with no
+  config impact. Use the new `/home/doron-linux/datasets/Rellis/ros2/...`
+  paths for any future run; see [[reference-rellis3d-dataset]] (memory).
+- User then asked to consolidate `00002_hill_1_ros2` (main LiDAR+IMU+tf+
+  wheel-odom bag) and `00002_hill_1_gps_ros2` (the separately-extracted
+  Vectornav GPS+Odom bag, disjoint topics from the same recording) into a
+  single bag so only one `00002` source needs to be kept. No built-in
+  `ros2 bag` merge command exists, so wrote a one-off script using the
+  `rosbags` Python library (already in `.venv`) to read both bags'
+  connections+messages, sort all 181856 messages by timestamp, and write
+  them to one new bag, preserving each connection's serialization format
+  and QoS profiles (notably `/tf_static`'s `TRANSIENT_LOCAL` durability).
+  Verified before deleting anything: per-topic and total message counts in
+  the merged bag exactly match the sum of the two inputs, duration
+  (414.831225753s) matches, and `ros2 bag info` (native ROS 2 tooling, not
+  just the `rosbags` library) reads it back correctly with all 7 topics.
+  Resulting single-source bag:
+  `/home/doron-linux/datasets/Rellis/ros2/00002_hill_1_full_ros2` (~25GB).
+  Deleted the two originals after verification, on explicit user
+  confirmation. Merge script was scratchpad-only, not added to
+  `scripts/` (one-off consolidation, not expected to be needed again).
