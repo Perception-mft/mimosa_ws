@@ -32,6 +32,7 @@ anything about mimosa's degeneracy handling from these two results.
 | Sequence (RELLIS-3D, profile `rellis`) | Outcome | Notes |
 |---|---|---|
 | `example_merged` (60s "Merged" example) | clean run, no crash | net displacement 54.5m vs wheel-odom's 51.8m (~5% off); but mimosa's total path length (83.7m) is ~50% longer than wheel odom's (56.2m) — see RELLIS-3D section below for interpretation. |
+| `00002` full sequence (~415s, `20200215_hill_1.bag`) | **crashes partway through** on Known Issue #9 | reproducible across 3 runs, crash point varies (~207-365s) — real-time backlog, not a fixed bug location; screen recording of a run up to the crash is at `results/rellis_00002_run_20261125_085311.mp4`. GPS ground-truth path (no curated GT exists) extracted and plotted — see Visualization section. |
 
 RELLIS-3D has no ground-truth trajectory in this clip, so this is a sanity
 check (does it track roughly the right shape/distance), not an ATE/RPE
@@ -110,6 +111,29 @@ evaluation.
    by the graph) or there's a compensating error elsewhere — not changed
    here since it's out of scope for the `rellis` work, but worth a
    deliberate look.
+9. **(Open)** On the full `00002` RELLIS-3D sequence (~415s, vs the 60s
+   demo clip Known Issue #7 was tested against), `mimosa_node` crashes
+   (SIGABRT) with an uncaught `std::runtime_error` from
+   `imu::Manager::getInterpolatedMeasurements` (`src/imu/manager.cpp:412`,
+   "IMU lookup requiring first message of the buffer ... This should never
+   happen"). Root cause: per-scan LiDAR processing time climbs steadily
+   over the run (from ~10-20ms early on to 100-330ms later), eventually
+   exceeding the 10Hz scan arrival rate and the `rellis` profile's
+   `max_buffer_duration: 1.1s` IMU rolling-buffer window — a real-time
+   backlog, not a one-off timestamp bug. Confirmed across three separate
+   runs with the crash landing at a different point each time (~207s, then
+   ~344s and ~365s in two runs done while also screen-recording the RViz
+   window, which adds CPU contention and plausibly shifts when the backlog
+   crosses the threshold) — consistent with a resource-accumulation crash
+   rather than a fixed repro timestamp. Most likely driver: the local
+   scan-to-map voxel structure growing unbounded as the vehicle covers real
+   outdoor terrain over several minutes (the 60s clip never ran long enough
+   for this to matter). Three non-exclusive fix options proposed, not yet
+   decided: (1) make `getInterpolatedMeasurements` degrade gracefully
+   instead of throwing, mirroring Known Issue #1's pattern; (2) tune
+   `lidar.geometric`'s map-growth settings (`lru_horizon`, voxel leaf
+   sizes, `point_skip_divisor`) to bound per-scan cost on long sequences;
+   (3) just document as a known limitation and move on. See Open Items.
 
 ## Evaluation Methodology Notes
 
@@ -173,6 +197,57 @@ second (not synced to playback time, so it appears all at once rather than
 growing with the bag). If this is useful going forward, it should be
 promoted into `scripts/` with the alignment computed automatically rather
 than pasted in by hand per sequence.
+
+**RELLIS-3D reuses the same "Ground Truth" display** — no `mimosa.rviz`
+changes needed, confirmed by publishing to `/gt/path` and screenshotting the
+result. Source: `/vectornav/GPS` (`sensor_msgs/NavSatFix`), extracted from
+the original ROS1 bag (`rosbags-convert --include-topic /vectornav/GPS
+--include-topic /vectornav/Odom`, since the main `rellis` conversion
+deliberately dropped these — see RELLIS-3D Profile section) into
+`datasets/rellis/00002_hill_1_gps_ros2`. Lat/lon converted to a local ENU
+tangent plane anchored at the first fix (flat-earth approximation, fine at
+this ~100m scale). A static 3D plot of this same GPS trajectory (colored by
+elapsed time) is at `results/rellis_00002_gps_trajectory_3d.png`, with the
+raw data in `results/rellis_00002_gps_trajectory.csv`.
+
+**Sensor-layout extrinsic between the Vectornav and the Ouster IMU IS
+applied** (this was initially missed — the first pass anchored the raw GPS
+antenna position directly, with no lever-arm correction). `/vectornav/GPS`
+and `/vectornav/Odom` are both stamped in frame `imu_link`, which this
+bag's own `/tf_static` places relative to the Ouster via
+`imu_link -> os1_frame -> ouster1/os1_sensor -> ouster1/os1_imu` (same tree
+Known Issue #8's `T_B_S` derivation used). Composing that chain gives a
+~0.46m lever arm `[0.456253, 0.011775, -0.077645]` (Vectornav body axes)
+from the Vectornav to the Ouster's internal IMU — mimosa's body origin for
+this profile. Each GPS fix is corrected by this lever arm rotated by the
+nearest-in-time `/vectornav/Odom` orientation (GPS itself has no
+orientation), producing `results/rellis_00002_gps_realtime.csv` (columns:
+`t_abs,x,y,z`, absolute epoch matching LiDAR/IMU header stamps).
+
+**No heading/yaw alignment is applied, and this is a bigger caveat than the
+lever arm above** — there's no Umeyama transform to invert (unlike ENWIDE)
+because there's no mimosa trajectory run yet to align against, and no
+independent heading reference was used (the VN-300's own fused heading in
+`/vectornav/Odom` could arguably serve as one, but hasn't been). The GPS
+path is anchored at the same origin convention as mimosa's own start pose
+(both ≈ (0,0,0)) but its X/Y axes are true East/North, while `mimosa_map`'s
+are whatever the vehicle was heading at t=0 — so position/shape/scale are
+comparable, but the whole GPS path may appear rotated relative to mimosa's
+estimated path until a real alignment is computed (e.g. via `evo` once both
+trajectories exist in TUM format, same as the ENWIDE workflow).
+
+**Realtime (sim-time-synced) playback**: `tum_path_publisher.py` dumps the
+whole static path at a fixed wall-clock rate, which doesn't grow alongside
+a bag replay. Added `scripts/sim_time_path_publisher.py` — a generic node
+(not RELLIS/GPS-specific) that takes any `t_abs,x,y,z` CSV and only
+publishes poses whose timestamp has already been reached in ROS sim time,
+so the `/gt/path` line grows in step with `ros2 bag play --clock`. Needs
+`use_sim_time:=true` and a live `/clock` source. Verified against a 10x-
+speed bag replay + RViz-only (no `mimosa_node` needed, since `/gt/path`'s
+frame_id matches the Fixed Frame directly): screenshots at two points in
+the replay showed a visibly longer partial path, confirming growth, not a
+static dump.
+  `python3 src/mimosa/mimosa/scripts/sim_time_path_publisher.py results/rellis_00002_gps_realtime.csv --frame_id mimosa_map --topic_name /gt/path --hz 5.0`
 
 ## RELLIS-3D Profile
 
@@ -262,8 +337,18 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
 - [ ] Resolve Known Issue #2 (degeneracy protection off) before trusting
       results on degenerate sequences.
 - [ ] Resolve Known Issue #3 (`integration_sigma: 0`).
-- [ ] Decide whether the GT-overlay RViz tooling is worth productizing into
-      `scripts/`.
+- [ ] Decide on a fix for Known Issue #9 (long-sequence IMU-buffer crash on
+      RELLIS-3D `00002`) — band-aid graceful degradation, bound map-growth
+      cost, or document-and-move-on.
+- [ ] Compute a real alignment (evo-style, like ENWIDE) between the RELLIS
+      GPS ground-truth path and mimosa's estimated trajectory once a run
+      exists to align against — current overlay has no heading alignment
+      (see Visualization section).
+- [x] ~~Decide whether the GT-overlay RViz tooling is worth productizing
+      into `scripts/`.~~ Reused as-is for RELLIS-3D (second dataset) via
+      the existing `tum_path_publisher.py` + a one-off TUM export — no new
+      tooling needed, `mimosa.rviz`'s "Ground Truth" display is already
+      dataset-agnostic.
 - [ ] `scripts/dataset_evaluation.py` / `evaluate.sh` need rewriting (paths,
       stale log reference, RPE pose_relation) if they're meant to be used
       again rather than superseded by ad hoc runs like this one.
@@ -321,3 +406,54 @@ Google Drive links (no direct mirror), listed in RELLIS-3D's GitHub README.
   reached key 563. Cross-checked net displacement and path length against
   the bag's own (unused-by-mimosa) wheel odometry — see RELLIS-3D section
   for the numbers and what they do/don't tell us.
+
+### 2026-11-25 — Full RELLIS-3D `00002` sequence: recording, GPS extraction, GT overlay
+- Downloaded and converted the full `00002` sequence ("Merged", ~415s,
+  `20200215_hill_1.bag`) earlier in the week; this session re-ran it with
+  `viz:=true` and screen-recorded the RViz window to
+  `results/rellis_00002_run_20261125_085311.mp4` (~7.4min, 2574x1420@20fps)
+  for a visual record of mimosa running on real off-road data. Installed
+  `ffmpeg` and `vlc` (not previously on this machine) to do the capture and
+  playback; set `vlc` as the default `video/mp4` handler via `xdg-mime`.
+- The run crashed partway through on Known Issue #9 (newly documented this
+  session, previously only noted in agent memory) — confirmed reproducible
+  across three independent runs, each crashing at a different point,
+  consistent with the resource-accumulation root cause already suspected.
+- Researched the RELLIS-3D dataset's public materials (GitHub README):
+  found per-sequence YouTube videos (00002's is
+  https://www.youtube.com/watch?v=aXaOmzjHmNE) and confirmed there is no
+  curated ground-truth trajectory for any sequence — only raw Vectornav
+  VN-300 GPS/INS and wheel odometry, same conclusion as the 60s-clip run.
+- Extracted `/vectornav/GPS` + `/vectornav/Odom` from the original ROS1 bag
+  (previously excluded from the main `rellis` conversion) into
+  `datasets/rellis/00002_hill_1_gps_ros2`. Built a 3D trajectory plot from
+  the GPS fixes (`results/rellis_00002_gps_trajectory_3d.png` +
+  underlying CSV) — shows a ~27m x 117m out-and-back loop with ~12m of
+  elevation change, matching the "hill_1" name.
+- Wired this GPS path into mimosa's existing RViz "Ground Truth" overlay
+  (reusing `scripts/tum_path_publisher.py` unmodified, no `mimosa.rviz`
+  changes) and confirmed visually (screenshot) that it renders correctly in
+  the `mimosa_map` frame. See Visualization section for the no-alignment
+  caveat — this is a shape/scale check, not an aligned ATE-style overlay.
+- Ran a live `viz:=true` replay of the full `00002` sequence a second time
+  (no recording) with this GPS overlay running alongside — stopped
+  manually by the user partway through (~282s in, no crash this time,
+  further than the three prior runs that did crash on Known Issue #9;
+  consistent with it being a load-dependent backlog, not a fixed-point
+  bug).
+- User asked whether the dataset's own sensor layout (tf tree) was used for
+  the Vectornav-to-Ouster extrinsic. It hadn't been for the GPS overlay —
+  the first pass anchored the raw GPS antenna position with no lever-arm
+  correction. Fixed: composed the bag's own `/tf_static` chain
+  (`imu_link -> os1_frame -> ouster1/os1_sensor -> ouster1/os1_imu`) to get
+  the ~0.46m Vectornav-to-Ouster-IMU lever arm, applied it to each GPS fix
+  rotated by the nearest `/vectornav/Odom` orientation sample (confirmed
+  first via header timestamps that GPS/LiDAR/IMU all share one clock
+  domain, start times within 0.32s of each other over the 415s run). See
+  Visualization section for the full derivation and the remaining
+  (larger) no-heading-alignment caveat this doesn't fix.
+- Built `scripts/sim_time_path_publisher.py` for a true sim-time-synced
+  "growing" GT path (the existing `tum_path_publisher.py` only does a
+  static full-path dump), since the user wanted the GPS path published in
+  realtime rather than all at once. Verified it grows correctly against a
+  10x-speed bag replay before handing back.
